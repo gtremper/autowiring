@@ -7,12 +7,17 @@
 #include "is_shared_ptr.h"
 #include "ObjectPool.h"
 #include "is_any.h"
+#include "MicroAutoFilter.h"
+#include <sstream>
+#include <typeinfo>
 #include MEMORY_HEADER
 #include TYPE_INDEX_HEADER
 #include STL_UNORDERED_MAP
 #include EXCEPTION_PTR_HEADER
 
-struct SatCounter;
+//DEBUG
+#include <iostream>
+
 class AutoPacketFactory;
 class AutoPacketProfiler;
 struct AutoFilterDescriptor;
@@ -37,12 +42,12 @@ class AutoPacket:
 {
 private:
   AutoPacket(const AutoPacket& rhs) = delete;
-  AutoPacket(AutoPacketFactory& factory);
+  AutoPacket(AutoPacketFactory& factory, const std::shared_ptr<Object>& outstanding);
 
 public:
   ~AutoPacket(void);
 
-  static ObjectPool<AutoPacket> CreateObjectPool(AutoPacketFactory& factory);
+  static ObjectPool<AutoPacket> CreateObjectPool(AutoPacketFactory& factory, const std::shared_ptr<Object>& outstanding);
 
 private:
   // A back-link to the previously issued packet in the packet sequence.  May potentially be null,
@@ -51,21 +56,61 @@ private:
 
   // Saturation counters, constructed when the packet is created and reset each time thereafter
   std::vector<SatCounter> m_satCounters;
+  size_t m_subscriberNum;
 
   // The set of decorations currently attached to this object, and the associated lock:
   mutable std::mutex m_lock;
   typedef std::unordered_map<std::type_index, DecorationDisposition> t_decorationMap;
   t_decorationMap m_decorations;
 
-  /// <summary>
-  /// Last change call with unsatisfied optional arguments
-  /// </summary>
-  void ResolveOptions(void);
+  // Outstanding count local and remote holds:
+  std::shared_ptr<Object> m_outstanding;
+  const std::shared_ptr<Object>& m_outstandingRemote;
 
   /// <summary>
-  /// Resets counters, then decrements subscribers requiring AutoPacket argument.
+  /// Resets satisfaction counters and decoration status.
   /// </summary>
+  /// <remarks>
+  /// Is it expected that AutoPacketFactory will call methods in the following order:
+  /// AutoPacket(); //Construction in ObjectPool
+  /// Initialize(); //Issued from ObjectPool
+  /// Decorate();
+  /// ... //More Decorate calls
+  /// Finalize(); //Returned to ObjectPool
+  /// Initialize();
+  /// ... //More Issue & Return cycles
+  /// ~AutoPacket(); //Destruction in ObjectPool
+  /// Reset() must be called before the body of Initialize() in order to begin in the
+  /// correct state. It must also be called after the body of Finalize() in order to
+  /// avoid holding shared_ptr references.
+  /// Therefore Reset() is called at the conclusion of both AutoPacket() and Finalize().
+  /// </remarks>
+  void Reset(void);
+
+  /// <summary>
+  /// Decrements subscribers requiring AutoPacket argument then calls all initializing subscribers.
+  /// </summary>
+  /// <remarks>
+  /// Initialize is called when a packet is issued by the AutoPacketFactory.
+  /// It is not called when the Packet is created since that could result in
+  /// spurious calls when no packet is issued.
+  /// </remarks>
   void Initialize(void);
+
+  /// <summary>
+  /// Last chance call with unsatisfied optional arguments.
+  /// </summary>
+  /// <remarks>
+  /// This is called when the packet is returned to the AutoPacketFactory.
+  /// It is not called when the Packet is destroyed, since that could result in
+  /// suprious calles when no packet is issued.
+  /// </remarks>
+  void Finalize(void);
+
+  /// <summary>
+  /// Adds a recipient for data associated only with this issuance of the packet.
+  /// </summary>
+  void InitializeRecipient(const AutoFilterDescriptor& descriptor);
 
   /// <summary>
   /// Marks the specified entry as being unsatisfiable
@@ -138,8 +183,12 @@ public:
   template<class T>
   const T& Get(void) const {
     const T* retVal;
-    if(!Get(retVal))
-      throw_rethrowable autowiring_error("Attempted to obtain a value which was not decorated on this packet");
+    if(!Get(retVal)) {
+      std::stringstream ss;
+      ss << "Attempted to obtain a type " << typeid(retVal).name()
+         << " which was not decorated on this packet";
+      throw std::runtime_error(ss.str());
+    }
     return *retVal;
   }
 
@@ -148,6 +197,7 @@ public:
   /// </summary>
   template<class T>
   bool Get(const T*& out) const {
+    std::lock_guard<std::mutex> lk(m_lock);
     static_assert(!std::is_same<T, AutoPacket>::value, "Cannot decorate a packet with another packet");
 
     auto q = m_decorations.find(typeid(T));
@@ -178,6 +228,7 @@ public:
   /// </summary>
   template<class T>
   bool Get(const std::shared_ptr<T>*& out) const {
+    std::lock_guard<std::mutex> lk(m_lock);
     auto q = m_decorations.find(typeid(T));
     if(q != m_decorations.end() && q->second.satisfied) {
       auto& disposition = q->second;
@@ -212,17 +263,20 @@ public:
     {
       std::lock_guard<std::mutex> lk(m_lock);
       auto& entry = m_decorations[typeid(type)];
-      if(entry.satisfied)
-        throw std::runtime_error("Cannot decorate this packet with type T, the requested decoration already exists");
-      if(entry.isCheckedOut)
-        throw std::runtime_error("Cannot check out this decoration, it's already checked out elsewhere");
+      if (entry.satisfied) {
+        std::stringstream ss;
+        ss << "Cannot decorate this packet with type " << typeid(*ptr).name()
+           << ", the requested decoration already exists";
+        throw std::runtime_error(ss.str());
+      }
+      if(entry.isCheckedOut) {
+        std::stringstream ss;
+        ss << "Cannot check out decoration of type " << typeid(*ptr).name()
+           << ", it is already checked out elsewhere";
+        throw std::runtime_error(ss.str());
+      }
       entry.isCheckedOut = true;
       entry.wasCheckedOut = true;
-    }
-
-    // Have to find the entry _again_ within the context of a lock and satisfy it here:
-    {
-      std::lock_guard<std::mutex> lk(m_lock);
       m_decorations[typeid(type)].m_decoration = ptr;
     }
 
@@ -268,7 +322,7 @@ public:
   /// </summary>
   /// <returns>A reference to the internally persisted object</returns>
   /// <remarks>
-  /// Unlike Publish, the Decorate method is unconditional and will install the passed
+  /// The Decorate method is unconditional and will install the passed
   /// value regardless of whether any subscribers exist.
   /// </remarks>
   template<class T>
@@ -301,27 +355,32 @@ public:
   /// If multiple values are specified, all will be simultaneously made valid and
   /// then invalidated.
   /// </remarks>
-  template<class... Ts>
-  void DecorateImmediate(const Ts&... immeds) {
-    // These are the things we're going to be working with while we perform immediate decoration:
-    static const std::type_info* sc_typeInfo [] = {&typeid(Ts)...};
-    const void* pvImmeds[] = {&immeds...};
-    DecorationDisposition* pTypeSubs[sizeof...(Ts)];
-
+  template<class T, class... Ts>
+  void DecorateImmediate(const T& immed, const Ts&... immeds) {
     // None of the inputs may be shared pointers--if any of the inputs are shared pointers, they must be attached
     // to this packet via Decorate, or else dereferenced and used that way.
     static_assert(
-      !is_any<is_shared_ptr<Ts>...>::value,
+      !is_any<is_shared_ptr<T>, is_shared_ptr<Ts>...>::value,
       "DecorateImmediate must not be used to attach a shared pointer, use Decorate on such a decoration instead"
     );
+    
+    // These are the things we're going to be working with while we perform immediate decoration:
+    static const std::type_info* s_argTypes [] = {&typeid(T), &typeid(Ts)...};
+    static const size_t s_arity = 1 + sizeof...(Ts);
+    const void* pvImmeds [] = {&immed, &immeds...};
+    DecorationDisposition* pTypeSubs[s_arity];
 
     // Perform standard decoration with a short initialization:
     {
       std::lock_guard<std::mutex> lk(m_lock);
-      for(size_t i = 0; i < sizeof...(Ts); i++) {
-        pTypeSubs[i] = &m_decorations[*sc_typeInfo[i]];
-        if(pTypeSubs[i]->wasCheckedOut)
-          throw std::runtime_error("Cannot perform immediate decoration with type T, the requested decoration already exists");
+      for(size_t i = 0; i < s_arity; i++) {
+        pTypeSubs[i] = &m_decorations[*s_argTypes[i]];
+        if(pTypeSubs[i]->wasCheckedOut) {
+          std::stringstream ss;
+          ss << "Cannot perform immediate decoration with type " << s_argTypes[i]->name()
+             << ", the requested decoration already exists";
+          throw std::runtime_error(ss.str());
+        }
 
         // Mark the entry as appropriate:
         pTypeSubs[i]->satisfied = true;
@@ -334,17 +393,26 @@ public:
     // Pulse satisfaction:
     MakeAtExit([this, &pTypeSubs] {
       // Mark entries as unsatisfiable:
-      for(auto pEntry : pTypeSubs) {
+      for(DecorationDisposition*  pEntry : pTypeSubs) {
         pEntry->satisfied = false;
         pEntry->m_pImmediate = nullptr;
       }
 
       // Now trigger a rescan to hit any deferred, unsatisfiable entries:
-      static const std::type_info* lamda_typeInfos [] = {&typeid(Ts)...};
-      for(auto ti : lamda_typeInfos)
+      for(const std::type_info* ti : s_argTypes)
         MarkUnsatisfiable(*ti);
     }),
-    PulseSatisfaction(pTypeSubs, sizeof...(Ts));
+    PulseSatisfaction(pTypeSubs, s_arity);
+  }
+
+  /// <summary>
+  /// Adds a function to be called as an AutoFilter for this packet only.
+  /// </summary>
+  template<class Ret, class... Args>
+  void AddRecipient(std::function<Ret(Args...)> f) {
+    InitializeRecipient(
+      MakeAutoFilterDescriptor(std::make_shared<MicroAutoFilter<Ret, Args...>>(f))
+    );
   }
 
   /// <returns>

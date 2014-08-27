@@ -1,32 +1,35 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "CoreJobTest.hpp"
 #include <autowiring/CoreJob.h>
-#include <autowiring/move_only.h>
 #include THREAD_HEADER
 #include FUTURE_HEADER
 
+class CoreJobTest:
+  public testing::Test
+{};
+
 TEST_F(CoreJobTest, VerifySimpleProperties) {
   AutoRequired<CoreJob> jb;
+  AutoCurrentContext ctxt;
 
-  ASSERT_FALSE(m_create->IsInitiated()) << "CoreJob reported it could receive events before its enclosing context was created";
+  ASSERT_FALSE(ctxt->IsInitiated()) << "CoreJob reported it could receive events before its enclosing context was created";
 
   // Create a thread which will delay for acceptance, and then quit:
-  auto future = std::async(std::launch::async, [this] { //GRAHAM
-    m_create->DelayUntilInitiated();
+  auto future = std::async(std::launch::async, [this, &ctxt] {
+    ctxt->DelayUntilInitiated();
   });
 
   // Verify that this thread doesn't back out right away:
   ASSERT_EQ(std::future_status::timeout, future.wait_for(std::chrono::milliseconds(10))) << "CoreJob did not block a client who was waiting for its readiness to accept dispatchers";
 
   // Now start the context and verify that certain properties changed as anticipated:
-  m_create->Initiate();
-  ASSERT_TRUE(m_create->DelayUntilInitiated()) << "CoreJob did not correctly delay for dispatch acceptance";
+  ctxt->Initiate();
+  ASSERT_TRUE(ctxt->DelayUntilInitiated()) << "CoreJob did not correctly delay for dispatch acceptance";
 
   // Verify that the blocked thread has become unblocked and quits properly:
   ASSERT_EQ(std::future_status::ready, future.wait_for(std::chrono::seconds(1))) << "CoreJob did not correctly signal a blocked thread that it was ready to accept dispatchers";
 
-  m_create->SignalShutdown(true);
+  ctxt->SignalShutdown(true);
 }
 
 TEST_F(CoreJobTest, VerifySimpleSubmission) {
@@ -72,9 +75,7 @@ TEST_F(CoreJobTest, VerifyTeardown) {
   EXPECT_TRUE(check3) << "Lambda 3 didn't finish";
 }
 
-struct SimpleListen:
-  virtual EventReceiver
-{
+struct SimpleListen{
   SimpleListen():
     m_flag(false)
   {}
@@ -99,24 +100,6 @@ TEST_F(CoreJobTest, VerifyNoEventReceivers){
 
   fire(&SimpleListen::SetFlag)();
   EXPECT_FALSE(listener->m_flag) << "Lister recived event event though it wasn't initiated";
-}
-
-class CanOnlyMove {
-public:
-  CanOnlyMove(){}
-  ~CanOnlyMove(){}
-  CanOnlyMove(const CanOnlyMove& derp) = delete;
-  CanOnlyMove(CanOnlyMove&& derp){}
-};
-
-TEST_F(CoreJobTest, MoveOnly){
-  CanOnlyMove move;
-  //CanOnlyMove derp = move; //error
-
-  MoveOnly<CanOnlyMove> mo(std::move(move));
-
-  MoveOnly<CanOnlyMove> first = mo;
-  //MoveOnly<CanOnlyMove> second = mo; //error
 }
 
 TEST_F(CoreJobTest, AbandonedDispatchers) {

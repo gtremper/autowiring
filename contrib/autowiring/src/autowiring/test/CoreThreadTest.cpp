@@ -1,10 +1,13 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "CoreThreadTest.hpp"
 #include "TestFixtures/SimpleThreaded.hpp"
 #include <autowiring/at_exit.h>
 #include <autowiring/Autowired.h>
 #include THREAD_HEADER
+
+class CoreThreadTest:
+  public testing::Test
+{};
 
 static_assert(
   std::is_same<
@@ -48,10 +51,12 @@ public:
 };
 
 TEST_F(CoreThreadTest, VerifyStartSpam) {
+  AutoCurrentContext ctxt;
+
   // Create our thread class:
   AutoRequired<SpamguardTest> instance;
 
-  m_create->Initiate();
+  ctxt->Initiate();
 
   // This shouldn't cause another thread to be created:
   instance->Start(std::shared_ptr<Object>((Object*) 1, [] (Object*) {}));
@@ -71,8 +76,10 @@ public:
 };
 
 TEST_F(CoreThreadTest, VerifyIndefiniteDelay) {
+  AutoCurrentContext ctxt;
+
   AutoRequired<InvokesIndefiniteWait> instance;
-  m_create->Initiate();
+  ctxt->Initiate();
 
   // Verify that the instance does not quit until we pend something:
   ASSERT_FALSE(instance->WaitFor(std::chrono::milliseconds(10))) << "Thread instance exited prematurely, when it should have been waiting indefinitely";
@@ -83,6 +90,7 @@ TEST_F(CoreThreadTest, VerifyIndefiniteDelay) {
 }
 
 TEST_F(CoreThreadTest, VerifyNestedTermination) {
+  AutoCurrentContext ctxt;
   std::shared_ptr<SimpleThreaded> st;
 
   // Insert a thread into a second-order subcontext:
@@ -104,14 +112,13 @@ TEST_F(CoreThreadTest, VerifyNestedTermination) {
   ASSERT_TRUE(st->IsRunning()) << "Child thread was not running as expected";
 
   // Shut down the enclosing context:
-  m_create->SignalTerminate(true);
+  ctxt->SignalTerminate(true);
 
   // Verify that the child thread has stopped:
   ASSERT_FALSE(st->IsRunning()) << "Child thread was running even though the enclosing context was terminated";
 }
 
-class SleepEvent : public virtual EventReceiver
-{
+class SleepEvent {
 public:
   virtual Deferred SleepFor(int seconds) = 0;
   virtual Deferred SleepForThenThrow(int seconds) = 0;
@@ -137,7 +144,7 @@ public:
   }
 };
 
-TEST_F(CoreThreadTest, VerifyDispatchQueueShutdown) {
+TEST_F(CoreThreadTest, AUTOTHROW_VerifyDispatchQueueShutdown) {
   AutoCreateContext ctxt;
   CurrentContextPusher pusher(ctxt);
 
@@ -160,12 +167,12 @@ TEST_F(CoreThreadTest, VerifyDispatchQueueShutdown) {
 
 }
 
-TEST_F(CoreThreadTest, VerifyNoLeakOnExecptions) {
+TEST_F(CoreThreadTest, AUTOTHROW_VerifyNoLeakOnExecptions) {
   AutoCreateContext ctxt;
   CurrentContextPusher pshr(ctxt);
 
   AutoRequired<ListenThread> listener;
-  std::shared_ptr<std::string> value(new std::string("sentinal"));
+  auto value = std::make_shared<std::string>("sentinal");
 
   std::weak_ptr<std::string> watcher(value);
   try
@@ -182,8 +189,10 @@ TEST_F(CoreThreadTest, VerifyNoLeakOnExecptions) {
 }
 
 TEST_F(CoreThreadTest, VerifyDelayedDispatchQueueSimple) {
+  AutoCurrentContext ctxt;
+
   // Run our threads immediately, no need to wait
-  m_create->Initiate();
+  ctxt->Initiate();
 
   // Create a thread which we'll use just to pend dispatch events:
   AutoRequired<CoreThread> t;
@@ -196,8 +205,8 @@ TEST_F(CoreThreadTest, VerifyDelayedDispatchQueueSimple) {
   std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
   // These are flags--we'll set them to true as the test proceeds
-  std::shared_ptr<bool> x(new bool(false));
-  std::shared_ptr<bool> y(new bool(false));
+  auto x = std::make_shared<bool>(false);
+  auto y = std::make_shared<bool>(false);
 
   // Pend a delayed event first, and then an immediate event right afterwards:
   *t += std::chrono::hours(1), [x] { *x = true; };
@@ -210,10 +219,11 @@ TEST_F(CoreThreadTest, VerifyDelayedDispatchQueueSimple) {
 }
 
 TEST_F(CoreThreadTest, VerifyNoDelayDoubleFree) {
-  m_create->Initiate();
+  AutoCurrentContext ctxt;
+  ctxt->Initiate();
 
   // We won't actually be referencing this, we just want to make sure it's not destroyed early
-  std::shared_ptr<bool> x(new bool);
+  auto x = std::make_shared<bool>();
 
   // This deferred pend will never actually be executed:
   AutoRequired<CoreThread> t;
@@ -228,12 +238,14 @@ TEST_F(CoreThreadTest, VerifyNoDelayDoubleFree) {
 }
 
 TEST_F(CoreThreadTest, VerifyDoublePendedDispatchDelay) {
+  AutoCurrentContext ctxt;
+
   // Immediately pend threads:
-  m_create->Initiate();
+  ctxt->Initiate();
 
   // Some variables that we will set to true as the test proceeds:
-  std::shared_ptr<bool> x(new bool(false));
-  std::shared_ptr<bool> y(new bool(false));
+  auto x = std::make_shared<bool>(false);
+  auto y = std::make_shared<bool>(false);
 
   // Create a thread as before, and pend a few events.  The order, here, is important.  We intentionally
   // pend an event that won't happen for awhile, in order to trick the dispatch queue into waiting for
@@ -255,7 +267,8 @@ TEST_F(CoreThreadTest, VerifyDoublePendedDispatchDelay) {
 }
 
 TEST_F(CoreThreadTest, VerifyTimedSort) {
-  m_create->Initiate();
+  AutoCurrentContext ctxt;
+  ctxt->Initiate();
   AutoRequired<CoreThread> t;
 
   std::vector<size_t> v;
@@ -277,11 +290,12 @@ TEST_F(CoreThreadTest, VerifyTimedSort) {
 }
 
 TEST_F(CoreThreadTest, VerifyPendByTimePoint) {
-  m_create->Initiate();
+  AutoCurrentContext ctxt;
+  ctxt->Initiate();
   AutoRequired<CoreThread> t;
 
   // Pend by an absolute time point, nothing really special here
-  std::shared_ptr<bool> x(new bool(false));
+  auto x = std::make_shared<bool>(false);
   *t += (std::chrono::steady_clock::now() + std::chrono::milliseconds(1)), [&t, x] {
     *x = true;
     t->Stop();
@@ -311,17 +325,18 @@ public:
 };
 
 TEST_F(CoreThreadTest, NestedContextWait) {
+  AutoCurrentContext ctxt;
+
   // Initiate the outer context:
-  m_create->Initiate();
+  ctxt->Initiate();
 
   // Create a subcontext which has our delay thread in it:
-  AutoCreateContext ctxt;
   auto waitsAwhile = ctxt->Inject<WaitsALongTimeThenQuits>();
   ctxt->Initiate();
 
   // Stop and delay on the outer context:
-  m_create->SignalShutdown();
-  m_create->Wait();
+  ctxt->SignalShutdown();
+  ctxt->Wait();
 
   // Now we verify that our interior thread has actually quit:
   ASSERT_TRUE(!waitsAwhile->IsRunning()) << "Inner thread was marked running by CoreThread when outer context returned";
@@ -329,11 +344,13 @@ TEST_F(CoreThreadTest, NestedContextWait) {
 }
 
 TEST_F(CoreThreadTest, WaitBeforeInitiate) {
+  AutoCurrentContext ctxt;
+
   // Wait for the outer context before it's actually initiated:
-  ASSERT_FALSE(m_create->Wait(std::chrono::seconds(0))) << "A wait operation on a context succeeded even though it was not yet started";
+  ASSERT_FALSE(ctxt->Wait(std::chrono::seconds(0))) << "A wait operation on a context succeeded even though it was not yet started";
 
   // Stop the outer context without even starting it
-  m_create->SignalTerminate();
+  ctxt->SignalTerminate();
 
   // Try to add a thread to the context.  This should cause the thread to be immediately marked as "stopped" and should allow a Wait
   // operation on the thread to return right away.
@@ -343,35 +360,11 @@ TEST_F(CoreThreadTest, WaitBeforeInitiate) {
   ASSERT_TRUE(ct->WaitFor(std::chrono::seconds(0))) << "A thread added to an already-stopped context did not correctly respond to a zero-duration wait";
 
   // Wait again.  This should suceed right away.
-  ASSERT_TRUE(m_create->Wait(std::chrono::seconds(0))) << "Failed to wait on a context which should have already been stopped";
+  ASSERT_TRUE(ctxt->Wait(std::chrono::seconds(0))) << "Failed to wait on a context which should have already been stopped";
 }
 
-template<ThreadPriority priority>
-class JustIncrementsANumber:
-  public CoreThread
-{
-public:
-  JustIncrementsANumber():
-    val(0)
-  {}
-  
-  volatile int64_t val;
-
-  // This will be a hotly contested conditional variable
-  AutoRequired<std::mutex> contended;
-
-  void Run(void) override {
-    ElevatePriority p(*this, priority);
-
-    while(!ShouldStop()) {
-      // Obtain the lock and then increment our value:
-      std::lock_guard<std::mutex> lk(*contended);
-      val++;
-    }
-  }
-};
-
 TEST_F(CoreThreadTest, ReentrantStopOnTeardown) {
+  AutoCurrentContext ctxt;
   std::shared_ptr<CoreThread> ct = AutoRequired<CoreThread>();
 
   // Our thread will try to stop itself on teardown, this will cause it to trivially deadlock if any locks
@@ -381,9 +374,9 @@ TEST_F(CoreThreadTest, ReentrantStopOnTeardown) {
   });
 
   // Kickoff and then delay:
-  m_create->Initiate();
-  m_create->SignalShutdown();
-  ASSERT_TRUE(m_create->Wait(std::chrono::seconds(1))) << "Thread deadlocked when attempting to stop itself from a teardown listener";
+  ctxt->Initiate();
+  ctxt->SignalShutdown();
+  ASSERT_TRUE(ctxt->Wait(std::chrono::seconds(1))) << "Thread deadlocked when attempting to stop itself from a teardown listener";
 }
 
 class VerifiesCurrentContextOnRundown:
@@ -444,52 +437,3 @@ TEST_F(CoreThreadTest, PendAfterShutdown) {
   // Verify that the lambda was destroyed more or less right away
   ASSERT_TRUE(v.unique()) << "Shared pointer in a lambda closure appears to have been leaked";
 }
-
-#ifdef _MSC_VER
-#include "windows.h"
-
-TEST_F(CoreThreadTest, VerifyCanBoostPriority) {
-  // Create two spinners and kick them off at the same time:
-  AutoRequired<JustIncrementsANumber<ThreadPriority::BelowNormal>> lower;
-  AutoRequired<JustIncrementsANumber<ThreadPriority::Normal>> higher;
-  m_create->Initiate();
-
-  // We want all of our threads to run on ONE cpu for awhile, and then we want to put it back at exit
-  DWORD_PTR originalAffinity, systemAffinity;
-  GetProcessAffinityMask(GetCurrentProcess(), &originalAffinity, &systemAffinity);
-  SetProcessAffinityMask(GetCurrentProcess(), 1);
-  auto onreturn = MakeAtExit([originalAffinity] {
-    SetProcessAffinityMask(GetCurrentProcess(), originalAffinity);
-  });
-
-  // Poke the conditional variable a lot:
-  AutoRequired<std::mutex> contended;
-  for(size_t i = 100; i--;) {
-    // We sleep while holding contention lock to force waiting threads into the sleep queue.  The reason we have to do
-    // this is due to the way that mutex is implemented under the hood.  The STL mutex uses a high-frequency variable
-    // and attempts to perform a CAS (check-and-set) on this variable.  If it succeeds, the lock is obtained; if it
-    // fails, it will put the thread into a non-ready state by calling WaitForSingleObject on Windows or one of the
-    // mutex_lock methods on Unix.
-    //
-    // When a thread can't be run, it's moved from the OS's ready queue to the sleep queue.  The scheduler knows that
-    // the thread can be moved back to the ready queue if a particular object is signalled, but in the case of a lock,
-    // only one of the threads waiting on the object can actually be moved to the ready queue.  It's at THIS POINT that
-    // the operating system consults the thread priority--if only thread can be moved over, then the highest priority
-    // thread will wind up in the ready queue every time.
-    //
-    // Thread priority does _not_ necessarily influence the amount of time the scheduler allocates allocated to a ready
-    // thread with respect to other threads of the same process.  This is why we hold the lock for a full millisecond,
-    // in order to force the thread over to the sleep queue and ensure that the priority resolution mechanism is
-    // directly tested.
-    std::lock_guard<std::mutex> lk(*contended);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-
-  // Need to terminate before we try running a comparison.
-  m_create->SignalTerminate();
-
-  ASSERT_LE(lower->val, higher->val) << "A lower-priority thread was moved out of the sleep queue more frequently than a high-priority thread";
-}
-#else
-#pragma message "Warning:  SetThreadPriority not implemented on Unix"
-#endif

@@ -1,10 +1,13 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "PostConstructTest.hpp"
 #include "TestFixtures/SimpleObject.hpp"
 #include <autowiring/Autowired.h>
 #include <autowiring/ContextMember.h>
 #include THREAD_HEADER
+
+class PostConstructTest:
+  public testing::Test
+{};
 
 using namespace std;
 
@@ -14,7 +17,7 @@ class ContextExposer:
 public:
   size_t DeferredCount(void) const {
     size_t ct = 0;
-    for(auto& entry : CoreContext::m_typeMemos)
+    for(const auto& entry : CoreContext::m_typeMemos)
       for(auto cur = entry.second.pFirst; cur; cur = cur->GetFlink())
         ct++;
     return ct;
@@ -257,13 +260,13 @@ TEST_F(PostConstructTest, VerifyAllInstancesSatisfied) {
 
 TEST_F(PostConstructTest, ContextNotifyWhenAutowired) {
   auto called = std::make_shared<bool>(false);
+  AutoCurrentContext ctxt;
   
   // Now we'd like to be notified when SimpleObject gets added:
-  m_create->NotifyWhenAutowired<SimpleObject>(
-    [called] {
+  ctxt->NotifyWhenAutowired<SimpleObject>(
+  [called] {
       *called = true;
-    }
-  );
+  });
 
   // Should only be two uses, at this point, of the capture of the above lambda:
   EXPECT_EQ(2L, called.use_count()) << "Unexpected number of references held in a capture lambda";
@@ -279,3 +282,115 @@ TEST_F(PostConstructTest, ContextNotifyWhenAutowired) {
   ASSERT_TRUE(called.unique()) << "Autowiring notification lambda was not properly cleaned up";
 }
 
+TEST_F(PostConstructTest, ContextNotifyWhenAutowiredPostConstruct) {
+  auto called = std::make_shared<bool>(false);
+  AutoCurrentContext ctxt;
+
+  // Create an object that will satisfy subsequent notification call:
+  AutoRequired<SimpleObject> sobj;
+
+  // Notification should be immediate:
+  ctxt->NotifyWhenAutowired<SimpleObject>(
+  [called] {
+      *called = true;
+  });
+
+  // Insert the SimpleObject, see if the lambda got hit:
+  ASSERT_TRUE(*called) << "Context-wide autowiring notification was not hit as expected when a matching type was injected into a context";
+
+  // Our shared pointer should be unique by this point, because the lambda should have been destroyed
+  ASSERT_TRUE(called.unique()) << "Autowiring notification lambda was not properly cleaned up";
+}
+
+class OtherObject : public SimpleObject {};
+
+TEST_F(PostConstructTest, RecursiveNotificationPreConstruction) {
+  auto called = std::make_shared<bool>(false);
+  AutoCurrentContext ctxt;
+
+  // Ensure that nested calls do not created deadlock
+  // Notification should be deferred:
+  ctxt->NotifyWhenAutowired<SimpleObject>(
+  [called] {
+    AutoCurrentContext()->NotifyWhenAutowired<OtherObject>(
+    [called] {
+      *called = true;
+    });
+  });
+
+  // Create an object that will satisfy subsequent notification call:
+  AutoRequired<SimpleObject> sobj;
+  AutoRequired<OtherObject> oobj;
+
+  // Insert the SimpleObject, see if the lambda got hit:
+  ASSERT_TRUE(*called) << "Context-wide autowiring notification was not hit as expected when a matching type was injected into a context";
+
+  // Our shared pointer should be unique by this point, because the lambda should have been destroyed
+  ASSERT_TRUE(called.unique()) << "Autowiring notification lambda was not properly cleaned up";
+}
+
+TEST_F(PostConstructTest, RecursiveNotificationPostConstruction) {
+  auto called = std::make_shared<bool>(false);
+  AutoCurrentContext ctxt;
+
+  // Create an object that will satisfy subsequent notification call:
+  AutoRequired<SimpleObject> sobj;
+  AutoRequired<OtherObject> oobj;
+
+  // Ensure that nested calls do not created deadlock
+  // Notification should be immediate:
+  ctxt->NotifyWhenAutowired<SimpleObject>(
+  [called] {
+    AutoCurrentContext()->NotifyWhenAutowired<OtherObject>(
+    [called] {
+      *called = true;
+    });
+  });
+
+  // Insert the SimpleObject, see if the lambda got hit:
+  ASSERT_TRUE(*called) << "Context-wide autowiring notification was not hit as expected when a matching type was injected into a context";
+
+  // Our shared pointer should be unique by this point, because the lambda should have been destroyed
+  ASSERT_TRUE(called.unique()) << "Autowiring notification lambda was not properly cleaned up";
+}
+
+struct ClassWithAutoInit:
+  std::enable_shared_from_this<ClassWithAutoInit>
+{
+  ClassWithAutoInit(void) :
+    m_constructed(true),
+    m_postConstructed(false)
+  {}
+
+  void AutoInit(void) {
+    ASSERT_TRUE(m_constructed) << "A postconstruct routine was called BEFORE the corresponding constructor";
+    m_postConstructed = true;
+
+    auto myself = shared_from_this();
+    ASSERT_EQ(this, myself.get()) << "Reflexive shared_from_this did not return a shared pointer to this as expected";
+  }
+
+  bool m_constructed;
+  bool m_postConstructed;
+};
+
+static_assert(has_autoinit<ClassWithAutoInit>::value, "AutoInit-bearing class did not pass a static type check");
+
+TEST_F(PostConstructTest, PostConstructGetsCalled) {
+  AutoRequired<ClassWithAutoInit> cwai;
+  ASSERT_TRUE(cwai->m_constructed) << "Trivial constructor call was not made as expected";
+  ASSERT_TRUE(cwai->m_postConstructed) << "Auto-initialization routine was not called on an initializable type";
+}
+
+struct PostConstructThrowsException {
+  void AutoInit(void) const {
+    throw std::runtime_error("Autoinit crashing for no reason");
+  }
+};
+
+TEST_F(PostConstructTest, PostConstructCanSafelyThrow) {
+  ASSERT_ANY_THROW(AutoRequired<PostConstructThrowsException>()) << "AutoInit call threw an exception, but it was incorrectly eaten by Autowiring";
+
+  Autowired<PostConstructThrowsException> pcte;
+  ASSERT_FALSE(pcte.IsAutowired()) << "A context member which threw an exception post-construction was incorrectly introduced into a context";
+}

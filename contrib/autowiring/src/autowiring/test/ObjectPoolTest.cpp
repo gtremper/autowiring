@@ -1,8 +1,11 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "ObjectPoolTest.hpp"
 #include "TestFixtures/SimpleThreaded.hpp"
 #include <autowiring/ObjectPool.h>
+
+class ObjectPoolTest:
+  public testing::Test
+{};
 
 class PooledObject {
 };
@@ -21,7 +24,140 @@ TEST_F(ObjectPoolTest, VerifyOutstandingLimit) {
   EXPECT_TRUE(obj3 == nullptr) << "Object pool issued more objects than it was authorized to issue";
 }
 
-TEST_F(ObjectPoolTest, VerifyAsynchronousUsage) {
+class LifeCycle {
+  static int constructNum;
+  static int destructNum;
+  static std::mutex numLock;
+
+  //Lock ensures that status checks are atomic.
+  //This does not prevent asynchronous calls.
+  std::mutex stageLock;
+  enum LifeStage {
+    pooled,
+    issued
+  } stage;
+
+public:
+  LifeCycle() : stage(pooled) {
+    std::lock_guard<std::mutex> guard(numLock);
+    ++constructNum;
+  }
+
+  ~LifeCycle() {
+    {
+      std::lock_guard<std::mutex> guard(numLock);
+      ++destructNum;
+    }
+    std::lock_guard<std::mutex> guard(stageLock);
+    if (stage != pooled) {
+      throw std::runtime_error("Destructor called before Finalize");
+    }
+  }
+
+  static ObjectPool<LifeCycle>* NewObjectPool(size_t limit = ~0, size_t maxPooled = ~0) {
+    return new ObjectPool<LifeCycle>(limit, maxPooled,
+      [] { return new LifeCycle(); },
+      [] (LifeCycle& life) { life.Initialize(); },
+      [] (LifeCycle& life) { life.Finalize(); }
+    );
+  }
+
+  static void InitializeNum() {
+    std::lock_guard<std::mutex> guard(numLock);
+    constructNum = 0;
+    destructNum = 0;
+  }
+  static int ConstructNum() {
+    std::lock_guard<std::mutex> guard(numLock);
+    return constructNum;
+  }
+  static int DestructNum() {
+    std::lock_guard<std::mutex> guard(numLock);
+    return destructNum;
+  }
+
+protected:
+  void Initialize() {
+    std::lock_guard<std::mutex> guard(stageLock);
+    if (stage != pooled)
+      throw std::runtime_error("Initialize called on object not pooled");
+    stage = issued;
+  }
+
+  void Finalize() {
+    std::lock_guard<std::mutex> guard(stageLock);
+    if (stage != issued)
+      throw std::runtime_error("Finalize called on object not issued");
+    stage = pooled;
+  }
+};
+
+std::mutex LifeCycle::numLock;
+int LifeCycle::constructNum = 0;
+int LifeCycle::destructNum = 0;
+
+TEST_F(ObjectPoolTest, LifeCycleTestLimitOne) {
+  LifeCycle::InitializeNum();
+  
+  std::shared_ptr<ObjectPool<LifeCycle>> pool(LifeCycle::NewObjectPool(2, 2));
+  std::shared_ptr<LifeCycle> objHold, objDrop;
+
+  // Create in Pool
+  try {
+    pool->Preallocate(1);
+  } catch (std::runtime_error e) {
+    FAIL() << e.what();
+  }
+  ASSERT_EQ(1, LifeCycle::ConstructNum());
+  ASSERT_EQ(0, LifeCycle::DestructNum());
+
+  // Issue from Pool
+  try {
+    (*pool)(objHold);
+  } catch (std::runtime_error e) {
+    FAIL() << e.what();
+  }
+  ASSERT_EQ(1, LifeCycle::ConstructNum());
+  ASSERT_EQ(0, LifeCycle::DestructNum());
+
+  // Issue from Pool with implicit Creation of objDrop
+  try {
+    (*pool)(objDrop);
+  } catch (std::runtime_error e) {
+    FAIL() << e.what();
+  }
+  ASSERT_EQ(2, LifeCycle::ConstructNum());
+  ASSERT_EQ(0, LifeCycle::DestructNum());
+
+  // Return to Pool
+  try {
+    objDrop.reset();
+  } catch (std::runtime_error e) {
+    FAIL() << e.what();
+  }
+  ASSERT_EQ(2, LifeCycle::ConstructNum());
+  ASSERT_EQ(0, LifeCycle::DestructNum());
+
+  // Destroy Pool with implicit Destruction of objDrop
+  try {
+    pool.reset();
+  } catch (std::runtime_error e) {
+    FAIL() << e.what();
+  }
+  ASSERT_EQ(2, LifeCycle::ConstructNum());
+  ASSERT_EQ(1, LifeCycle::DestructNum());
+
+  // Return to Pool redirected to Destruction of objHold
+  try {
+    objHold.reset();
+  } catch (std::runtime_error e) {
+    FAIL() << e.what();
+  }
+  ASSERT_EQ(2, LifeCycle::ConstructNum());
+  ASSERT_EQ(2, LifeCycle::DestructNum());
+}
+
+TEST_F(ObjectPoolTest, DISABLED_VerifyAsynchronousUsage) {
   AutoCreateContext ctxt;
   CurrentContextPusher pshr(ctxt);
 
@@ -108,6 +244,7 @@ public:
 };
 
 TEST_F(ObjectPoolTest, EmptyPoolIssuance) {
+  AutoCurrentContext ctxt;
   ObjectPool<int> pool;
 
   // Create the thread which will hold the shared pointer for awhile:
@@ -123,7 +260,7 @@ TEST_F(ObjectPoolTest, EmptyPoolIssuance) {
   EXPECT_ANY_THROW(pool.Wait()) << "An attempt to obtain an element on an empty pool did not throw an exception as expected";
 
   // Now see if we can delay for the thread to back out:
-  m_create->Initiate();
+  ctxt->Initiate();
   pool.Rundown();
 
   // Verify that it got released as expected:
@@ -168,13 +305,13 @@ TEST_F(ObjectPoolTest, MovableObjectPool) {
 }
 
 TEST_F(ObjectPoolTest, MovableObjectPoolAysnc) {
-  static const size_t sc_count = 10000;
+  static const size_t s_count = 10000;
   ObjectPool<int> from;
 
   {
     // Issue a zillion objects from the from pool:
     std::vector<std::shared_ptr<int>> objs;
-    for(size_t i = sc_count; i--;)
+    for(size_t i = s_count; i--;)
       objs.push_back(from.Wait());
 
     // Make a thread, let it hold these objects while we move its pool:
@@ -189,5 +326,5 @@ TEST_F(ObjectPoolTest, MovableObjectPoolAysnc) {
   AutoCurrentContext()->SignalShutdown(true);
 
   // Verify that new pool got all of the objects:
-  ASSERT_EQ(sc_count, to.GetCached()) << "Object pool move operation did not correctly relay checked out types";
+  ASSERT_EQ(s_count, to.GetCached()) << "Object pool move operation did not correctly relay checked out types";
 }

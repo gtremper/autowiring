@@ -4,13 +4,11 @@
 #include "AutoInjectable.h"
 #include "AutoPacketFactory.h"
 #include "BoltBase.h"
-#include "CoreContextStateBlock.h"
 #include "CoreThread.h"
 #include "GlobalCoreContext.h"
 #include "JunctionBox.h"
 #include "MicroBolt.h"
 #include "NewAutoFilter.h"
-#include "TypeRegistry.h"
 #include <algorithm>
 #include <stack>
 #include <iostream>
@@ -66,7 +64,7 @@ CoreContext::~CoreContext(void) {
   UnregisterEventReceiversUnsafe();
 
   // Tell all context members that we're tearing down:
-  for(auto q : m_contextMembers)
+  for(ContextMember* q : m_contextMembers)
     q->NotifyContextTeardown();
 }
 
@@ -222,8 +220,8 @@ void CoreContext::AddInternal(const AddInternalTraits& traits) {
   }
 
   // Event receivers:
-  if(traits.pRecvr) {
-    JunctionBoxEntry<EventReceiver> entry(this, traits.pRecvr);
+  if(traits.receivesEvents) {
+    JunctionBoxEntry<Object> entry(this, traits.pObject);
 
     // Add to our vector of local receivers first:
     (std::lock_guard<std::mutex>)m_stateBlock->m_lock,
@@ -240,7 +238,7 @@ void CoreContext::AddInternal(const AddInternalTraits& traits) {
 
     // Ancilliary subscribers, if present:
     for(const auto* pCur = stump.pFirstAutoFilter; pCur; pCur = pCur->pFlink) {
-      AutoFilterDescriptor subscriber(traits.subscriber.GetAutoFilter(), pCur->m_stub);
+      AutoFilterDescriptor subscriber(traits.subscriber.GetAutoFilter(), pCur->stub);
       AddPacketSubscriber(subscriber);
     }
   }
@@ -269,8 +267,8 @@ void CoreContext::FindByTypeUnsafe(AnySharedPointer& reference) const {
 
   // Resolve based on iterated dynamic casts for each concrete type:
   bool assigned = false;
-  for(auto q = m_concreteTypes.begin(); q != m_concreteTypes.end(); q++) {
-    if(!reference->try_assign(**q))
+  for(const auto& type : m_concreteTypes) {
+    if(!reference->try_assign(*type))
       // No match, try the next entry
       continue;
 
@@ -286,6 +284,26 @@ void CoreContext::FindByTypeUnsafe(AnySharedPointer& reference) const {
   m_typeMemos[type].m_value = reference;
 }
 
+void CoreContext::FindByTypeRecursiveUnsafe(AnySharedPointer&& reference, const std::function<void(AnySharedPointer&)>& terminal) const {
+  FindByTypeUnsafe(reference);
+  if (reference) {
+    // Type satisfied in current context
+    terminal(reference);
+    return;
+  }
+
+  if (m_pParent) {
+    std::lock_guard<std::mutex> guard(m_pParent->m_stateBlock->m_lock);
+    // Recurse while holding lock on this context
+    // NOTE: Racing Deadlock is only possible if there is a simultaneous descending locked chain,
+    // but by definition of contexts this is forbidden.
+    m_pParent->FindByTypeRecursiveUnsafe(std::move(reference), terminal);
+  } else {
+    // Call function while holding all locks through global scope.
+    terminal(reference);
+  }
+}
+
 std::shared_ptr<CoreContext> CoreContext::GetGlobal(void) {
   return std::static_pointer_cast<CoreContext, GlobalCoreContext>(GlobalCoreContext::Get());
 }
@@ -296,15 +314,20 @@ std::vector<std::shared_ptr<BasicThread>> CoreContext::CopyBasicThreadList(void)
   // It's safe to enumerate this list from outside of a protective lock because a linked list
   // has stable iterators, we do not delete entries from the interior of this list, and we only
   // add entries to the end of the list.
-  for(auto q = m_threads.begin(); q != m_threads.end(); q++){
-    BasicThread* thread = dynamic_cast<BasicThread*>(*q);
+  for(CoreRunnable* q : m_threads){
+    BasicThread* thread = dynamic_cast<BasicThread*>(q);
     if (thread)
-      retVal.push_back((*thread).GetSelf<BasicThread>());
+      retVal.push_back(thread->GetSelf<BasicThread>());
   }
   return retVal;
 }
 
 void CoreContext::Initiate(void) {
+  // First-pass check, used to prevent recursive deadlocks traceable to here that might
+  // result from entities trying to initiate subcontexts from CoreRunnable::Start
+  if(m_initiated || m_isShutdown)
+    return;
+
   {
     std::lock_guard<std::mutex> lk(m_stateBlock->m_lock);
     if(m_initiated)
@@ -336,7 +359,7 @@ void CoreContext::Initiate(void) {
   // Signal our condition variable
   m_stateBlock->m_stateChanged.notify_all();
 
-  for(auto q : m_threads)
+  for(CoreRunnable* q : m_threads)
     q->Start(outstanding);
 }
 
@@ -368,8 +391,8 @@ void CoreContext::SignalShutdown(bool wait, ShutdownMode shutdownMode) {
 
       // Fill strong lock series in order to ensure proper teardown interleave:
       childrenInterleave.reserve(m_children.size());
-      for(auto q = m_children.begin(); q != m_children.end(); q++) {
-        auto childContext = q->lock();
+      for(const auto& entry : m_children) {
+        auto childContext = entry.lock();
 
         // Technically, it *is* possible for this weak pointer to be expired, even though
         // we're holding the lock.  This may happen if the context itself is exiting even
@@ -380,7 +403,7 @@ void CoreContext::SignalShutdown(bool wait, ShutdownMode shutdownMode) {
           continue;
 
         // Add to the interleave so we can SignalTerminate in a controlled way.
-        childrenInterleave.push_back(q->lock());
+        childrenInterleave.push_back(childContext);
       }
     }
 
@@ -390,9 +413,9 @@ void CoreContext::SignalShutdown(bool wait, ShutdownMode shutdownMode) {
   }
 
   // Pass notice to all child threads:
-  bool graceful = shutdownMode == ShutdownMode::Graceful;
-  for(t_threadList::iterator q = m_threads.begin(); q != m_threads.end(); ++q)
-    (*q)->Stop(graceful);
+  bool graceful = (shutdownMode == ShutdownMode::Graceful);
+  for(CoreRunnable* runnable : m_threads)
+    runnable->Stop(graceful);
 
   // Signal our condition variable
   m_stateBlock->m_stateChanged.notify_all();
@@ -402,8 +425,8 @@ void CoreContext::SignalShutdown(bool wait, ShutdownMode shutdownMode) {
     return;
 
   // Wait for the treads to finish before returning.
-  for (t_threadList::iterator it = m_threads.begin(); it != m_threads.end(); ++it)
-    (**it).Wait();
+  for (CoreRunnable* runnable : m_threads)
+    runnable->Wait();
 }
 
 void CoreContext::Wait(void) {
@@ -471,7 +494,7 @@ void CoreContext::BuildCurrentState(void) {
   
   // Recurse on all children
   std::lock_guard<std::mutex> lk(m_stateBlock->m_lock);
-  for(auto c : m_children) {
+  for(const auto& c : m_children) {
     auto cur = c.lock();
     if(!cur)
       continue;
@@ -482,6 +505,9 @@ void CoreContext::BuildCurrentState(void) {
 }
 
 void CoreContext::CancelAutowiringNotification(DeferrableAutowiring* pDeferrable) {
+  if (!pDeferrable)
+    return;
+
   std::lock_guard<std::mutex> lk(m_stateBlock->m_lock);
   auto q = m_typeMemos.find(pDeferrable->GetType());
   if(q == m_typeMemos.end())
@@ -515,16 +541,17 @@ void CoreContext::CancelAutowiringNotification(DeferrableAutowiring* pDeferrable
 
 void CoreContext::Dump(std::ostream& os) const {
   std::lock_guard<std::mutex> lk(m_stateBlock->m_lock);
-  for(auto q = m_typeMemos.begin(); q != m_typeMemos.end(); q++) {
-    os << q->first.name();
-    const void* pObj = q->second.m_value->ptr();
+  
+  for(const auto& entry : m_typeMemos) {
+    os << entry.first.name();
+    const void* pObj = entry.second.m_value->ptr();
     if(pObj)
       os << " 0x" << std::hex << pObj;
     os << std::endl;
   }
 
-  for(auto q = m_threads.begin(); q != m_threads.end(); q++) {
-    BasicThread* pThread = dynamic_cast<BasicThread*>(*q);
+  for(CoreRunnable* runnable : m_threads) {
+    BasicThread* pThread = dynamic_cast<BasicThread*>(runnable);
     if (!pThread) continue;
 
     const char* name = pThread->GetName();
@@ -538,8 +565,8 @@ void ShutdownCurrentContext(void) {
 
 void CoreContext::UnregisterEventReceiversUnsafe(void) {
   // Release all event receivers originating from this context:
-  for(auto q : m_eventReceivers)
-    m_junctionBoxManager->RemoveEventReceiver(q);
+  for(const auto& entry : m_eventReceivers)
+    m_junctionBoxManager->RemoveEventReceiver(entry);
 
   // Notify our parent (if we have one) that our event receivers are going away:
   if(m_pParent)
@@ -554,21 +581,20 @@ void CoreContext::UnregisterEventReceiversUnsafe(void) {
 }
 
 void CoreContext::BroadcastContextCreationNotice(const std::type_info& sigil) const {
-  auto q = m_nameListeners.find(sigil);
-  if(q != m_nameListeners.end()) {
+  auto listeners = m_nameListeners.find(sigil);
+  if(listeners != m_nameListeners.end()) {
     // Iterate through all listeners:
-    const auto& list = q->second;
-    for(auto q = list.begin(); q != list.end(); q++)
-      (**q).ContextCreated();
+    for(BoltBase* bolt : listeners->second)
+      bolt->ContextCreated();
   }
 
   // In the case of an anonymous sigil type, we do not notify the all-types
   // listeners a second time.
   if(sigil != typeid(void)) {
-    q = m_nameListeners.find(typeid(void));
-    if(q != m_nameListeners.end())
-      for(auto cur : q->second)
-        cur->ContextCreated();
+    listeners = m_nameListeners.find(typeid(void));
+    if(listeners != m_nameListeners.end())
+      for(BoltBase* bolt : listeners->second)
+        bolt->ContextCreated();
   }
 
   // Notify the parent next:
@@ -606,7 +632,7 @@ void CoreContext::UpdateDeferredElements(std::unique_lock<std::mutex>&& lk, cons
       auto top = stk.top();
       stk.pop();
 
-      for(auto* pNext = top; pNext; pNext = pNext->GetFlink()) {
+      for(DeferrableAutowiring* pNext = top; pNext; pNext = pNext->GetFlink()) {
         pNext->SatisfyAutowiring(value.m_value->shared_ptr());
 
         // See if there's another chain we need to process:
@@ -626,9 +652,9 @@ void CoreContext::UpdateDeferredElements(std::unique_lock<std::mutex>&& lk, cons
   }
 
   // Give children a chance to also update their deferred elements:
-  for(auto q = m_children.begin(); q != m_children.end(); q++) {
+  for(const auto& weak_child : m_children) {
     // Hold reference to prevent this iterator from becoming invalidated:
-    auto ctxt = q->lock();
+    auto ctxt = weak_child.lock();
     if(!ctxt)
       continue;
 
@@ -643,11 +669,11 @@ void CoreContext::UpdateDeferredElements(std::unique_lock<std::mutex>&& lk, cons
   lk.unlock();
 
   // Run through everything else and finalize it all:
-  for(auto cur : satisfiable)
+  for(const auto& cur : satisfiable)
     cur.first->Finalize(cur.second);
 }
 
-void CoreContext::AddEventReceiver(JunctionBoxEntry<EventReceiver> entry) {
+void CoreContext::AddEventReceiver(JunctionBoxEntry<Object> entry) {
   {
     std::lock_guard<std::mutex> lk(m_stateBlock->m_lock);
 
@@ -690,7 +716,7 @@ void CoreContext::RemoveEventReceivers(t_rcvrSet::const_iterator first, t_rcvrSe
     m_pParent->RemoveEventReceivers(first, last);
 }
 
-void CoreContext::UnsnoopEvents(Object* oSnooper, const JunctionBoxEntry<EventReceiver>& receiver) {
+void CoreContext::UnsnoopEvents(Object* oSnooper, const JunctionBoxEntry<Object>& receiver) {
   {
     std::lock_guard<std::mutex> lk(m_stateBlock->m_lock);
     if(
@@ -718,13 +744,14 @@ void CoreContext::UnsnoopEvents(Object* oSnooper, const JunctionBoxEntry<EventRe
 
 void CoreContext::FilterException(void) {
   bool handled = false;
-  for(auto q = m_filters.begin(); q != m_filters.end(); q++)
+  for(ExceptionFilter* filter : m_filters) {
     try {
-      (*q)->Filter();
+      filter->Filter();
       handled = true;
     } catch(...) {
       // Do nothing
     }
+  }
 
   // Pass to parent if one exists:
   if(m_pParent) {
@@ -735,6 +762,7 @@ void CoreContext::FilterException(void) {
       // Parent handled it, we're good to go
       return;
     } catch(...) {
+      // Do nothing
     }
   }
 
@@ -743,15 +771,16 @@ void CoreContext::FilterException(void) {
     throw;
 }
 
-void CoreContext::FilterFiringException(const JunctionBoxBase* pProxy, EventReceiver* pRecipient) {
+void CoreContext::FilterFiringException(const JunctionBoxBase* pProxy, Object* pRecipient) {
   // Filter in order:
   for(CoreContext* pCur = this; pCur; pCur = pCur->GetParentContext().get())
-    for(auto q = pCur->m_filters.begin(); q != pCur->m_filters.end(); q++)
+    for(ExceptionFilter* filter : pCur->m_filters) {
       try {
-        (*q)->Filter(pProxy, pRecipient);
+        filter->Filter(pProxy, pRecipient);
       } catch(...) {
         // Do nothing, filter didn't want to filter this exception
       }
+    }
 }
 
 std::shared_ptr<AutoPacketFactory> CoreContext::GetPacketFactory(void) {
@@ -762,10 +791,7 @@ std::shared_ptr<AutoPacketFactory> CoreContext::GetPacketFactory(void) {
   return pf;
 }
 
-void CoreContext::AddDeferred(const AnySharedPointer& reference, DeferrableAutowiring* deferrable)
-{
-  std::lock_guard<std::mutex> lk(m_stateBlock->m_lock);
-
+void CoreContext::AddDeferredUnsafe(const AnySharedPointer& reference, DeferrableAutowiring* deferrable) {
   // Determine whether a type memo exists right now for the thing we're trying to defer.  If it doesn't
   // exist, we need to inject one in order to allow deferred satisfaction to know what kind of type we
   // are trying to satisfy at this point.

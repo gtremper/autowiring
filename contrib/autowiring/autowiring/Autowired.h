@@ -2,8 +2,8 @@
 #pragma once
 #include "AutowirableSlot.h"
 #include "Decompose.h"
+#include "Deferred.h"
 #include "GlobalCoreContext.h"
-#include "TypeRegistry.h"
 #include MEMORY_HEADER
 #include ATOMIC_HEADER
 
@@ -120,7 +120,6 @@ public:
     AutowirableSlot<T>(ctxt ? ctxt->template ResolveAnchor<T>() : ctxt),
     m_pFirstChild(nullptr)
   {
-    (void) RegType<T>::r;
     if(ctxt)
       ctxt->Autowire(*this);
   }
@@ -274,17 +273,50 @@ public:
 };
 
 /// <summary>
+/// Convenience class which attempts to inject type T and discards any exceptions
+/// </summary>
+/// <remarks>
+/// Use of this type is functionally equivalent to the following:
+///
+///  try {
+///    AutoCurrentContext()->Inject&lt;T&gt;();
+///  catch(...) {
+///    AutoCurrentContext()->FilterException();
+///  }
+///  Autowired&lt;T&gt; foo;
+///
+/// Users who wish to know whether an exception was thrown may replace uses of AutoDesired with the above
+/// and perform their own handling.
+/// </remarks>
+template<class T>
+class AutoDesired:
+  public Autowired<T>
+{
+public:
+  AutoDesired(void) {
+    try { AutoRequired<T>(); }
+    catch(...) {
+      CoreContext::CurrentContext()->FilterException();
+    }
+  }
+};
+
+/// <summary>
 /// Convenience class functionally identical to AutoRequired, but specialized to forward ctor arguments
 /// </summary>
 template<class T>
 class AutoConstruct:
-  public AutoRequired<T>
+  public std::shared_ptr<T>
 {
 public:
   template<class... Args>
   AutoConstruct(Args&&... args) :
-    AutoRequired<T>(CoreContext::CurrentContext(), std::forward<Args>(args)...)
+    std::shared_ptr<T>(CoreContext::CurrentContext()->template Construct<T>(std::forward<Args&&>(args)...))
   {}
+
+  operator bool(void) const { return IsAutowired(); }
+  operator T*(void) const { return std::shared_ptr<T>::get(); }
+  bool IsAutowired(void) const { return std::shared_ptr<T>::get() != nullptr; }
 };
 
 /// <summary>
@@ -296,21 +328,14 @@ template<class T>
 public:
   AutoFired(const std::shared_ptr<CoreContext>& ctxt = CoreContext::CurrentContext()):
     m_junctionBox(ctxt->GetJunctionBox<T>())
-  {
-    static_assert(std::is_base_of<EventReceiver, T>::value, "Cannot AutoFire a non-event type, your type must inherit EventReceiver");
-
-    // Add an utterance of the TypeRegistry so we can add this AutoFired type to our collection
-    (void) RegType<T>::r;
-  }
+  {}
 
   /// <summary>
   /// Utility constructor, used when the receiver is already known
   /// </summary>
   AutoFired(const std::shared_ptr<JunctionBox<T>>& junctionBox) :
     m_junctionBox(junctionBox)
-  {
-    (void) RegType<T>::r;
-  }
+  {}
 
   /// <summary>
   /// Utility constructor, used to support movement operations

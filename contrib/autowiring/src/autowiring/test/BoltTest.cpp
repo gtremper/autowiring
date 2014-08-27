@@ -1,12 +1,15 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "BoltTest.hpp"
 #include <autowiring/Autowired.h>
 #include <autowiring/Bolt.h>
 #include <autowiring/ContextCreator.h>
 #include "TestFixtures/SimpleObject.hpp"
 #include <string>
 #include <iostream>
+
+class BoltTest:
+  public testing::Test
+{};
 
 struct Pipeline {};
 struct OtherContext {};
@@ -80,9 +83,10 @@ public:
 };
 
 TEST_F(BoltTest, VerifySimpleInjection) {
+  AutoCurrentContext ctxt;
   AutoEnable<InjectsIntoPipeline>();
 
-  auto created = m_create->Create<Pipeline>();
+  auto created = ctxt->Create<Pipeline>();
 
   // Verify that the SimpleObject didn't accidentally get injected out here:
   {
@@ -143,10 +147,11 @@ TEST_F(BoltTest, VerifyCreationBubbling) {
 }
 
 TEST_F(BoltTest, VerifyMultipleInjection) {
+  AutoCurrentContext ctxt;
   AutoEnable<InjectsIntoBoth>();
 
-  auto created = m_create->Create<Pipeline>();
-  auto created2 = m_create->Create<OtherContext>();
+  auto created = ctxt->Create<Pipeline>();
+  auto created2 = ctxt->Create<OtherContext>();
 
   // Verify that the SimpleObject didn't accidentally get injected out here:
   {
@@ -168,6 +173,7 @@ TEST_F(BoltTest, VerifyMultipleInjection) {
 }
 
 TEST_F(BoltTest, EmptyBolt) {
+  AutoCurrentContext ctxt;
   AutoEnable<InjectsIntoEverything>();
   Autowired<CountObject> so;
   EXPECT_FALSE(so.IsAutowired()) << "CountObject injected into outer context";
@@ -180,11 +186,63 @@ TEST_F(BoltTest, EmptyBolt) {
     ASSERT_EQ(1, innerSo->count) << "ContextCreated() called incorrect number of times";
   }
 
-  auto created2 = m_create->Create<Pipeline>();
+  auto created2 = ctxt->Create<Pipeline>();
   {
     CurrentContextPusher pshr(created2);
     Autowired<CountObject> innerSo;
     ASSERT_TRUE(innerSo.IsAutowired()) << "CountObject not injected into named context";
     ASSERT_EQ(1, innerSo->count) << "ContextCreated() called incorrect number of times";
   }
+}
+
+template<class target>
+class TargetBoltable: public Boltable<target> {
+  static int numCons;
+  static int numDest;
+
+public:
+  static void InitializeNum() {
+    numCons = 0;
+    numDest = 0;
+  }
+  static int ConstructedNum() {return numCons;}
+  static int DestructedNum() {return numDest;}
+
+  TargetBoltable() {++numCons;}
+  ~TargetBoltable() {++numDest;}
+};
+
+template<class target>
+int TargetBoltable<target>::numCons = 0;
+template<class target>
+int TargetBoltable<target>::numDest = 0;
+
+TEST_F(BoltTest, BoltBeforeContext) {
+  AutoCurrentContext ctxt;
+  TargetBoltable<Pipeline>::InitializeNum();
+  AutoEnable<TargetBoltable<Pipeline>>();
+  ASSERT_EQ(0, TargetBoltable<Pipeline>::ConstructedNum()) << "Instantiated Boltable without context";
+  auto otherCtx = ctxt->Create<OtherContext>();
+  ASSERT_EQ(0, TargetBoltable<Pipeline>::ConstructedNum()) << "Instantiated on creation of unmatched context";
+
+  {
+    auto created = ctxt->Create<Pipeline>();
+    ASSERT_EQ(1, TargetBoltable<Pipeline>::ConstructedNum()) << "Failed to instantiate on creation of matching context";
+  }
+  ASSERT_EQ(1, TargetBoltable<Pipeline>::DestructedNum()) << "Failed to be destroyed with matching context";
+}
+
+TEST_F(BoltTest, BoltAfterContext) {
+  AutoCurrentContext ctxt;
+  TargetBoltable<OtherContext>::InitializeNum();
+  TargetBoltable<Pipeline>::InitializeNum();
+
+  {
+    auto created = ctxt->Create<Pipeline>();
+    AutoEnable<TargetBoltable<OtherContext>>();
+    ASSERT_EQ(0, TargetBoltable<OtherContext>::ConstructedNum()) << "Instantiated Boltable without context";
+    AutoEnable<TargetBoltable<Pipeline>>();
+    ASSERT_EQ(1, TargetBoltable<Pipeline>::ConstructedNum()) << "Failed to instantiate on creation of matching context";
+  }
+  ASSERT_EQ(1, TargetBoltable<Pipeline>::DestructedNum()) << "Failed to be destroyed with matching context";
 }

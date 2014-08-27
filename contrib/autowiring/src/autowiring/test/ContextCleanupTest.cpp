@@ -1,11 +1,14 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "ContextCleanupTest.hpp"
 #include "TestFixtures/SimpleObject.hpp"
 #include "TestFixtures/SimpleThreaded.hpp"
 #include <autowiring/Autowired.h>
 #include <autowiring/CoreContext.h>
 #include THREAD_HEADER
+
+class ContextCleanupTest:
+  public testing::Test
+{};
 
 TEST_F(ContextCleanupTest, ValidateTeardownOrder) {
   class WeakPtrChecker {
@@ -16,8 +19,9 @@ TEST_F(ContextCleanupTest, ValidateTeardownOrder) {
 
     std::weak_ptr<WeakPtrChecker> self;
   };
-
-  std::shared_ptr<WeakPtrChecker>(new WeakPtrChecker);
+  
+  // Construct, the destroy
+  std::make_shared<WeakPtrChecker>();
 }
 
 TEST_F(ContextCleanupTest, VerifyNoEarlyDtor) {
@@ -137,7 +141,8 @@ public:
 };
 
 TEST_F(ContextCleanupTest, VerifyGracefulThreadCleanup) {
-  m_create->Initiate();
+  AutoCurrentContext ctxt;
+  ctxt->Initiate();
   AutoRequired<CoreThread> ct;
 
   // Just create a CoreThread directly and have it pend some lambdas that will take awhile to run:
@@ -148,12 +153,13 @@ TEST_F(ContextCleanupTest, VerifyGracefulThreadCleanup) {
   *ct += [called] { *called = true; };
 
   // Verify that a graceful shutdown ensures both lambdas are called:
-  m_create->SignalShutdown(true, ShutdownMode::Graceful);
+  ctxt->SignalShutdown(true, ShutdownMode::Graceful);
   ASSERT_TRUE(*called) << "Graceful shutdown did not correctly run down all lambdas";
 }
 
 TEST_F(ContextCleanupTest, VerifyImmediateThreadCleanup) {
-  m_create->Initiate();
+  AutoCurrentContext ctxt;
+  ctxt->Initiate();
   AutoRequired<CoreThread> ct;
 
   // Just create a CoreThread directly and have it pend some lambdas that will take awhile to run:
@@ -172,7 +178,7 @@ TEST_F(ContextCleanupTest, VerifyImmediateThreadCleanup) {
   *ct += [called] { *called = true; };
 
   // Verify that a graceful shutdown ensures both lambdas are called:
-  m_create->SignalTerminate(true);
+  ctxt->SignalTerminate(true);
   ASSERT_FALSE(*called) << "Immediate shutdown incorrectly ran down the dispatch queue";
 }
 
@@ -210,22 +216,23 @@ public:
 
 TEST_F(ContextCleanupTest, VerifyThreadShutdownInterleave) {
   // Record the initial use count:
-  auto initCount = m_create.use_count();
+  AutoCurrentContext ctxt;
+  auto initCount = ctxt.use_count();
 
   // Create a thread that will take awhile to stop:
   AutoRequired<TakesALongTimeToExit> longTime;
 
   // We want threads to run as soon as they are added:
-  m_create->Initiate();
+  ctxt->Initiate();
 
   // Make the thread exit before the enclosing context exits:
   longTime->Continue();
   longTime->Stop();
 
   // Now stop the context and perform an explicit wait
-  m_create->SignalShutdown(true);
+  ctxt->SignalShutdown(true);
 
   // At this point, the thread must have returned AND released its shared pointer to the enclosing context
-  EXPECT_EQ(initCount, m_create.use_count()) << "Context thread persisted even after it should have fallen out of scope";
+  EXPECT_EQ(initCount, ctxt.use_count()) << "Context thread persisted even after it should have fallen out of scope";
 }
 
