@@ -1,8 +1,11 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "ContextMemberTest.hpp"
 #include "TestFixtures/SimpleObject.hpp"
 #include "TestFixtures/SimpleThreaded.hpp"
+
+class ContextMemberTest:
+  public testing::Test
+{};
 
 class IsAContextMember:
   public ContextMember
@@ -31,7 +34,7 @@ public:
   Autowired<SimpleObject> m_sobj;
 };
 
-#define offsetof_nowarn(s,m)   (size_t)&reinterpret_cast<const volatile char&>((((s *)0)->m))
+#define offsetof_nowarn(s,m)   ((size_t)&reinterpret_cast<const volatile char&>((((s *)1)->m)) - 1)
 
 TEST_F(ContextMemberTest, VerifyDetectedMembers)
 {

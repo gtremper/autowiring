@@ -5,12 +5,14 @@
 // Currently this is only supported on MSVC
 #ifdef _MSC_VER
   #include <thread>
-  #define NOMINMAX
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
 #endif
-	
+  
 #ifndef _MSC_VER
   #include <stdlib.h>
 #endif
 
 // C++11 glue logic, for platforms that have incomplete C++11 support
-#include "C++11/cpp11.h"
+#include "contrib/C++11/cpp11.h"

@@ -1,13 +1,15 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "ExceptionFilterTest.hpp"
 #include "TestFixtures/ThrowsWhenFired.hpp"
 #include "TestFixtures/ThrowsWhenRun.hpp"
-#include <autowiring/EventReceiver.h>
 #include <autowiring/ExceptionFilter.h>
 #include <stdexcept>
 #include <sstream>
 #include <iostream>
+
+class ExceptionFilterTest:
+  public testing::Test
+{};
 
 using namespace std;
 
@@ -69,7 +71,7 @@ public:
     }
   }
 
-  virtual void Filter(const JunctionBoxBase* pJunctionBox, EventReceiver* pRecipient) override {
+  virtual void Filter(const JunctionBoxBase* pJunctionBox, Object* pRecipient) override {
     m_hit = true;
     try {
       throw;
@@ -82,7 +84,7 @@ public:
   }
 };
 
-TEST_F(ExceptionFilterTest, ExceptionDestruction) {
+TEST_F(ExceptionFilterTest, AUTOTHROW_ExceptionDestruction) {
   // Add the exception filter type to the context first
   AutoRequired<GenericFilter> filter;
 
@@ -90,7 +92,7 @@ TEST_F(ExceptionFilterTest, ExceptionDestruction) {
   AutoRequired<ThrowsWhenRun<tracking_exception>> thrower;
 
   // Run:
-  m_create->Initiate();
+  AutoCurrentContext()->Initiate();
   thrower->Wait();
 
   // Verify that the exception was destroyed the correct number of times:
@@ -108,7 +110,7 @@ TEST_F(ExceptionFilterTest, CheckThrowThrow) {
   EXPECT_THROW(throw example(), std::exception) << "An exception type which throws from its ctor did not throw the expected type";
 }
 
-TEST_F(ExceptionFilterTest, ThreadThrowsCheck) {
+TEST_F(ExceptionFilterTest, AUTOTHROW_ThreadThrowsCheck) {
   // Add the exception filter type to the context first
   AutoRequired<GenericFilter> filter;
 
@@ -116,7 +118,7 @@ TEST_F(ExceptionFilterTest, ThreadThrowsCheck) {
   AutoRequired<ThrowsWhenRun<custom_exception>> thrower;
 
   // Wait for the thrower to terminate, should be pretty fast:
-  m_create->Initiate();
+  AutoCurrentContext()->Initiate();
   thrower->Wait();
 
   // Hopefully the filter got hit in the right spot:
@@ -160,10 +162,10 @@ TEST_F(ExceptionFilterTest, FireContainmentCheck) {
   EXPECT_TRUE(ctxt->IsShutdown()) << "An unhandled exception from a fire call in a context should have signalled it to stop";
 
   // Verify that the parent context was protected:
-  EXPECT_FALSE(m_create->IsShutdown()) << "An unhandled exception incorrectly terminated a parent context";
+  EXPECT_FALSE(AutoCurrentContext()->IsShutdown()) << "An unhandled exception incorrectly terminated a parent context";
 }
 
-TEST_F(ExceptionFilterTest, EnclosedThrowCheck) {
+TEST_F(ExceptionFilterTest, AUTOTHROW_EnclosedThrowCheck) {
   // Create our listener:
   AutoRequired<GenericFilter> filter;
 
@@ -209,7 +211,8 @@ TEST_F(ExceptionFilterTest, ExceptionFirewall) {
 }
 
 TEST_F(ExceptionFilterTest, VerifySimpleConfinement) {
-  m_create->Initiate();
+  AutoCurrentContext ctxt;
+  ctxt->Initiate();
 
   // Create a subcontext where the errant recipients will live:
   AutoCreateContext child;
@@ -224,7 +227,7 @@ TEST_F(ExceptionFilterTest, VerifySimpleConfinement) {
   tl(&ThrowingListener::DoThrow)();
 
   // Verify that the parent scope wasn't incorrectly terminated:
-  EXPECT_FALSE(m_create->IsShutdown()) << "Parent scope was terminated incorrectly due to an exception sourced by a child context";
+  EXPECT_FALSE(ctxt->IsShutdown()) << "Parent scope was terminated incorrectly due to an exception sourced by a child context";
 
   // Verify that the child scope was terminated as expected:
   EXPECT_TRUE(child->IsShutdown()) << "An event recipient in a child scope threw an exception and the child context was not correctly terminated";

@@ -1,9 +1,12 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "SelfSelectingFixtureTest.hpp"
 #include "SelfSelectingFixture.hpp"
 #include "OtherSelectingFixture.hpp"
 #include <autowiring/MicroBolt.h>
+
+class SelfSelectingFixtureTest:
+  public testing::Test
+{};
 
 struct SelfSelect {};
 
@@ -28,6 +31,7 @@ public:
 };
 
 TEST_F(SelfSelectingFixtureTest, LocalFixtureTest) {
+  AutoCurrentContext ctxt;
   Autowired<HitCountingBolt> hcb;
   ASSERT_FALSE(hcb.IsAutowired()) << "Hit-counting bolt was created before it was enabled";
 
@@ -38,7 +42,7 @@ TEST_F(SelfSelectingFixtureTest, LocalFixtureTest) {
   ASSERT_TRUE(hcb.IsAutowired()) << "Bolt not created after being enabled";
 
   // Verify the bolt gets hit:
-  m_create->Create<SimpleLocalClass>();
+  ctxt->Create<SimpleLocalClass>();
   ASSERT_EQ(1UL, hcb->m_hitCount) << "Bolt was not hit when a matching class was created";
 }
 

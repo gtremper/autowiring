@@ -1,16 +1,12 @@
 add_googletest(test)
-
-# These source files should all be treated as being local to their corresponding headers, so
-# we add the autowiring include path directly
-include_directories(../../autowiring)
+add_googletest(benchmark)
 
 set(Autowiring_SRCS
   at_exit.h
   AnySharedPointer.h
   AutoAnchor.h
   AutoCheckout.h
-  NewAutoFilter.h
-  NewAutoFilter.cpp
+  AutoRestarter.h
   AutoFuture.h
   AutoFuture.cpp
   CoreJob.h
@@ -54,18 +50,19 @@ set(Autowiring_SRCS
   CreationRules.h
   CurrentContextPusher.cpp
   CurrentContextPusher.h
+  DeclareAutoFilter.h
   Decompose.h
   DecorationDisposition.h
   Deserialize.h
-  deferred_ptr.h
+  Deferred.h
   DispatchQueue.h
   DispatchQueue.cpp
   DispatchThunk.h
   EventInputStream.h
   EventOutputStream.h
   EventOutputStream.cpp
-  EventReceiver.h
-  EventReceiver.cpp
+  EventRegistry.h
+  EventRegistry.cpp
   fast_pointer_cast.h
   JunctionBox.h
   JunctionBoxBase.h
@@ -76,15 +73,17 @@ set(Autowiring_SRCS
   ExceptionFilter.h
   GlobalCoreContext.cpp
   GlobalCoreContext.h
+  has_autoinit.h
   has_autofilter.h
   has_simple_constructor.h
   has_static_new.h
+  index_tuple.h
   is_any.h
   is_shared_ptr.h
+  is_auto_filter.h
   InterlockedExchange.h
   InvokeRelay.h
   atomic_object.h
-  shared_object.h
   unlock_object.h
   Object.h
   ObjectPool.h
@@ -92,8 +91,10 @@ set(Autowiring_SRCS
   ObjectPoolMonitor.cpp
   optional_ptr.h
   SatCounter.h
-  move_only.h
+  MicroAutoFilter.h
   MicroBolt.h
+  NewAutoFilter.h
+  NewAutoFilter.cpp
   SharedPointerSlot.h
   SlotInformation.h
   SlotInformation.cpp
@@ -102,6 +103,7 @@ set(Autowiring_SRCS
   ThreadStatusBlock.h
   ThreadStatusBlock.cpp
   thread_specific_ptr.h
+  TypeIdentifier.h
   TypeRegistry.h
   TypeRegistry.cpp
   TypeUnifier.h
@@ -123,16 +125,16 @@ set(Autowiring_Win_SRCS
 )
 
 set(Autowiring_Unix_SRCS
-	InterlockedExchangeUnix.cpp
+  InterlockedExchangeUnix.cpp
   thread_specific_ptr_unix.h
 )
 
 set(Autowiring_Mac_SRCS
-	CoreThreadMac.cpp
+  CoreThreadMac.cpp
 )
 
 set(Autowiring_Linux_SRCS
-	CoreThreadLinux.cpp
+  CoreThreadLinux.cpp
 )
 
 ADD_MSVC_DISABLED_FILES("Unix Source" Autowiring_SRCS ${Autowiring_Unix_SRCS})
@@ -154,39 +156,39 @@ else()
   set(Autowiring_SRCS ${Autowiring_Unix_SRCS} ${Autowiring_SRCS})
 endif()
 
-# All include files are located in /autowiring from here, so prepend that to all sources
-set(Autowiring_SRCS_TEMP ${Autowiring_SRCS})
-set(Autowiring_SRCS)
-foreach(i ${Autowiring_SRCS_TEMP})
-  string(REGEX MATCH ".*\\.h" hfile ${i})
-  if(hfile)
-    list(APPEND Autowiring_SRCS ../../autowiring/${i})
-  else()
-    list(APPEND Autowiring_SRCS ${i})
-  endif()
-endforeach()
-
+rewrite_header_paths(Autowiring_SRCS)
 ADD_MSVC_PRECOMPILED_HEADER("stdafx.h" "stdafx.cpp" Autowiring_SRCS)
 add_library(Autowiring STATIC ${Autowiring_SRCS})
+if(CMAKE_MAJOR_VERSION GREATER 2)
+  target_include_directories(Autowiring INTERFACE "../..")
+endif()
 set_property(TARGET Autowiring PROPERTY FOLDER "Autowiring")
+
+# Might as well reference the boost libraries to satisfy link dependencies, if we know they exist
+find_package(Boost COMPONENTS thread atomic chrono system date_time QUIET)
 if(Boost_FOUND)
-  # Might as well reference the boost libraries to satisfy link dependencies, if we know they exist
   target_link_libraries(Autowiring ${Boost_LIBRARIES})
 endif()
 
-if(UNIX)
-  target_link_libraries(Autowiring pthread)
+# Need multithreading services if available
+find_package(Threads)
+if(Threads_FOUND)
+  if(CMAKE_USE_PTHREADS_INIT)
+    target_link_libraries(Autowiring ${CMAKE_THREAD_LIBS_INIT})
+  endif()
 endif()
 
-install(TARGETS Autowiring DESTINATION lib COMPONENT autowiring CONFIGURATIONS ${CMAKE_CONFIGURATION_TYPES})
+if(NOT AUTOWIRING_IS_EMBEDDED)
+  install(TARGETS Autowiring DESTINATION ${CMAKE_BINARY_DIR}/lib COMPONENT autowiring CONFIGURATIONS ${CMAKE_CONFIGURATION_TYPES})
 
-foreach (src ${Autowiring_SRCS})
-  string(REGEX MATCH ".*\\.h" hfile ${src})
-  if(hfile)
-    install(
-      FILES ${hfile}
-      DESTINATION "include/Autowiring"
-      COMPONENT autowiring
-    )
-  endif()
-endforeach()
+  foreach (src ${Autowiring_SRCS})
+    string(REGEX MATCH ".*\\.h" hfile ${src})
+    if(hfile)
+      install(
+        FILES ${hfile}
+        DESTINATION "${CMAKE_SOURCE_DIR}/include/Autowiring"
+        COMPONENT autowiring
+      )
+    endif()
+  endforeach()
+endif()

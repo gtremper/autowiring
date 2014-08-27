@@ -5,7 +5,6 @@
 #include "BasicThreadStateBlock.h"
 #include "ContextEnumerator.h"
 #include "fast_pointer_cast.h"
-#include "move_only.h"
 
 // Explicit instantiation of supported time point types:
 template<> bool BasicThread::WaitUntil(std::chrono::steady_clock::time_point);
@@ -145,11 +144,12 @@ bool BasicThread::Start(std::shared_ptr<Object> outstanding) {
     m_state->m_stateCondition.notify_all();
   }
 
-  // Kick off a thread and return here
-  MoveOnly<std::shared_ptr<Object>> out(std::move(outstanding));
-  m_state->m_thisThread = std::thread(
-    [this, out] {
-      this->DoRun(std::move(out.value));
+  // Place the new thread entity directly in the space where it goes to avoid
+  // any kind of races arising from asynchronous access to this space
+  m_state->m_thisThread.~thread();
+  new (&m_state->m_thisThread) std::thread(
+    [this, outstanding] () mutable {
+      this->DoRun(std::move(outstanding));
     }
   );
   return true;
@@ -205,9 +205,8 @@ void BasicThread::Stop(bool graceful) {
 
 void BasicThread::ForceCoreThreadReidentify(void) {
   for(const auto& ctxt : ContextEnumerator(AutoGlobalContext())) {
-    auto threadListCpy = ctxt->CopyBasicThreadList();
-    for(auto q = threadListCpy.begin(); q != threadListCpy.end(); q++)
-      (**q).SetCurrentThreadName();
+    for(const auto& thread : ctxt->CopyBasicThreadList())
+      thread->SetCurrentThreadName();
   }
 }
 

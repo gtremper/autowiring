@@ -1,6 +1,5 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "EventReceiverTest.hpp"
 #include "TestFixtures/FiresManyEventsWhenRun.hpp"
 #include "TestFixtures/SimpleReceiver.hpp"
 #include <autowiring/Autowired.h>
@@ -10,12 +9,15 @@
 
 using namespace std;
 
-EventReceiverTest::EventReceiverTest(void) {
-  AutoCurrentContext ctxt;
-
-  // Start up the context:
-  ctxt->Initiate();
-}
+class EventReceiverTest:
+  public testing::Test
+{
+public:
+  EventReceiverTest(void) {
+    // Start up the context:
+    AutoCurrentContext()->Initiate();
+  }
+};
 
 TEST_F(EventReceiverTest, SimpleMethodCall) {
   AutoRequired<SimpleReceiver> receiver;
@@ -97,11 +99,11 @@ TEST_F(EventReceiverTest, NontrivialCopy) {
   // Accept dispatch delivery:
   //receiver->AcceptDispatchDelivery();
 
-  static const int sc_numElems = 10;
+  static const int s_numElems = 10;
 
   // Create the vector we're going to copy over:
   vector<int> ascending;
-  for(int i = 0; i < sc_numElems; i++)
+  for(int i = 0; i < s_numElems; i++)
     ascending.push_back(i);
 
   // Deferred fire:
@@ -120,7 +122,7 @@ TEST_F(EventReceiverTest, NontrivialCopy) {
 
   // Validate our vectors:
   ASSERT_EQ(10, (int)receiver->m_myVec.size()) << "Receiver was not populated correctly with a vector";
-  for(int i = 0; i < sc_numElems; i++)
+  for(int i = 0; i < s_numElems; i++)
     EXPECT_EQ(i, ascending[i]) << "Element at offset " << i << " was incorrectly copied";
 }
 
@@ -304,11 +306,12 @@ TEST_F(EventReceiverTest, PathologicalTransmitterTest) {
 }
 
 TEST_F(EventReceiverTest, VerifyDirectInvocation) {
+  AutoCurrentContext ctxt;
   AutoRequired<SimpleReceiver> receiver;
 
   // Indirect invocation:
-  m_create->Invoke(&CallableInterface::ZeroArgs)();
-  m_create->Invoke(&CallableInterface::OneArg)(100);
+  ctxt->Invoke(&CallableInterface::ZeroArgs)();
+  ctxt->Invoke(&CallableInterface::OneArg)(100);
 
   // Verify that stuff happens even when the thread isn't running:
   EXPECT_TRUE(receiver->m_zero);
@@ -331,9 +334,7 @@ TEST_F(EventReceiverTest, NoEventsAfterShutdown) {
   EXPECT_FALSE(receiver->m_zero) << "A context member caught an event after its enclosing context was torn down";
 }
 
-class PassByValueInterface:
-  public virtual EventReceiver
-{
+class PassByValueInterface {
 public:
   PassByValueInterface() {}
   virtual ~PassByValueInterface() {}
@@ -463,4 +464,24 @@ TEST_F(EventReceiverTest, VerifyCorrectContext){
   AutoFired<CallableInterface> fire(outerCtxt);
   fire(&CallableInterface::ZeroArgs)();
   EXPECT_TRUE(receiver->m_zero) << "AutoFired was created with the current context instead of the passed in context";
+}
+
+TEST_F(EventReceiverTest, EventChain){
+  class Middle{
+  public:
+    virtual void MyEvent() = 0;
+  };
+  
+  class MyReceiver:
+    public Middle
+  {
+  public:
+    virtual void MyEvent() {
+      ASSERT_TRUE(true);
+    }
+  };
+  
+  AutoRequired<MyReceiver> recr;
+  AutoCurrentContext ctxt;
+  ctxt->Invoke(&MyReceiver::MyEvent)();
 }

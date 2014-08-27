@@ -1,9 +1,12 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "ScopeTest.hpp"
 #include "TestFixtures/SimpleObject.hpp"
 #include <autowiring/Autowired.h>
 #include <autowiring/GlobalCoreContext.h>
+
+class ScopeTest:
+  public testing::Test
+{};
 
 TEST_F(ScopeTest, VerifyGlobalExists) {
   // Verify that we at least get a global scope
@@ -109,6 +112,7 @@ TEST_F(ScopeTest, AutowiringHeapMangle){
 }
 
 TEST_F(ScopeTest, AutowiringOrdering) {
+  AutoCurrentContext ctxt;
   AutoCreateContext outer;
   CurrentContextPusher outerPshr(outer);
   AutoCreateContext inner1;
@@ -155,7 +159,7 @@ TEST_F(ScopeTest, AutowiringOrdering) {
     // Verify preconditions and postconditions on autowiring:
     ASSERT_FALSE(d.IsAutowired());
     ASSERT_FALSE(d2.IsAutowired());
-    AutoRequired<D> derp(m_create);
+    AutoRequired<D> derp(ctxt);
 
     ASSERT_TRUE(d.IsAutowired()) << "Outer scope autowired field failed to be instantiated on an element created in an interior scope";
     ASSERT_TRUE(d2.IsAutowired()) << "Interior scope field failed to be satisfied by a field initiated at an outer context";

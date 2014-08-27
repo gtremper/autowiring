@@ -1,24 +1,13 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #pragma once
 #include "is_any.h"
+#include "index_tuple.h"
 #include "JunctionBox.h"
 
 class Deferred;
 
 template<typename T>
 class JunctionBox;
-
-// Generate and index tuple
-template<int ...>
-struct seq {};
-
-template<int N, int... S>
-struct gen_seq: gen_seq<N - 1, N - 1, S...> {};
-
-template<int... S>
-struct gen_seq<0, S...> {
-  typedef seq<S...> type;
-};
 
 /// <summary>
 /// A fully bound member function call
@@ -49,13 +38,13 @@ private:
   /// Places a call to the bound member function pointer by unpacking a lambda into it
   /// </summary>
   template<int... S>
-  void CallByUnpackingTuple(seq<S...>) {
+  void CallByUnpackingTuple(index_tuple<S...>) {
     (m_obj.*m_fnPtr)(std::move(std::get<S>(m_args))...);
   }
 
 public:
   void operator()(void) override {
-    CallByUnpackingTuple(typename gen_seq<sizeof...(Args)>::type());
+    CallByUnpackingTuple(typename make_index_tuple<sizeof...(Args)>::type());
   }
 };
 
@@ -94,11 +83,9 @@ public:
       // Context not yet started
       return;
 
-    const auto& dq = erp->GetDispatchQueue();
     std::lock_guard<std::mutex> lk(erp->GetDispatchQueueLock());
-
-    for(auto q = dq.begin(); q != dq.end(); q++)
-      (**q).AddExisting(new CurriedInvokeRelay<T, Args...>(dynamic_cast<T&>(**q), fnPtr, args...));
+    for(DispatchQueue* q : erp->GetDispatchQueue())
+      q->AddExisting(new CurriedInvokeRelay<T, Args...>(dynamic_cast<T&>(*q), fnPtr, args...));
   }
 };
 

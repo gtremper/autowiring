@@ -1,10 +1,14 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "DispatchQueueTest.hpp"
 #include <autowiring/CoreThread.h>
 #include <autowiring/DispatchQueue.h>
 
 using namespace std;
+
+class DispatchQueueTest:
+  public testing::Test,
+  public DispatchQueue
+{};
 
 class EventMaker:
   public CoreThread
@@ -48,7 +52,8 @@ TEST_F(DispatchQueueTest, PathologicalStartAndStop){
   AutoRequired<Thread<2>> t2;
   AutoRequired<Thread<3>> t3;
   AutoRequired<Thread<4>> t4;
-  m_create->Initiate();
+  AutoCurrentContext ctxt;
+  ctxt->Initiate();
 
   // We don't need a strong guarantee that these threads exit in a timely fashion, just that they
   // do so _eventually_.

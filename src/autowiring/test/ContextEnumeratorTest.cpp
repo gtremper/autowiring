@@ -1,8 +1,11 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "ContextEnumeratorTest.hpp"
 #include <autowiring/ContextEnumerator.h>
 #include MEMORY_HEADER
+
+class ContextEnumeratorTest:
+  public testing::Test
+{};
 
 TEST_F(ContextEnumeratorTest, DegenerateEnumeration) {
   size_t ct = 0;
@@ -86,7 +89,7 @@ TEST_F(ContextEnumeratorTest, VerifyComplexEnumeration) {
 
   // Verify there is only one context under the first context
   int firstCount = 0;
-  for(auto ctxt : ContextEnumeratorT<NamedContext>(firstContext)) {
+  for(const auto& ctxt : ContextEnumeratorT<NamedContext>(firstContext)) {
     firstCount++;
     ASSERT_EQ(ctxt, firstNamed);
     ASSERT_EQ(ctxt->GetParentContext(), firstContext);
@@ -95,7 +98,7 @@ TEST_F(ContextEnumeratorTest, VerifyComplexEnumeration) {
 
   // Verify there is only one context under the second context
   int secondCount = 0;
-  for(auto ctxt : ContextEnumeratorT<NamedContext>(secondContext)) {
+  for(const auto& ctxt : ContextEnumeratorT<NamedContext>(secondContext)) {
     secondCount++;
     ASSERT_EQ(ctxt, secondNamed);
     ASSERT_EQ(ctxt->GetParentContext(), secondContext);
@@ -103,10 +106,9 @@ TEST_F(ContextEnumeratorTest, VerifyComplexEnumeration) {
   ASSERT_EQ(secondCount, 1) << "Expected exactly one context in the parent context, found " << secondCount;
 
   // Verify global context structure
-  int globalCount = 0;
-  for(auto ctxt : ContextEnumeratorT<NamedContext>(AutoGlobalContext())) {
-    globalCount++;
-  }
+  auto enumerator = ContextEnumeratorT<NamedContext>(AutoGlobalContext());
+  int globalCount = std::distance(enumerator.begin(), enumerator.end());
+  
   ASSERT_EQ(globalCount, 2) << "Expected exactly one context in the parent context, found " << globalCount;
 }
 
@@ -165,7 +167,7 @@ TEST_F(ContextEnumeratorTest, ComplexRemovalInterference) {
   }
 
   // Now verify that nothing we eliminated was enumerated:
-  for(auto& cur : eliminated)
+  for(const auto& cur : eliminated)
     ASSERT_TRUE(cur.expired()) << "Found an element that was iterated after it should have been unreachable";
 }
 

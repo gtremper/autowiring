@@ -1,15 +1,16 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "TypeRegistryTest.hpp"
 #include <autowiring/Autowired.h>
 #include <autowiring/GlobalCoreContext.h>
 #include <autowiring/JunctionBox.h>
 #include <autowiring/TypeRegistry.h>
 
-template<int>
-class Registered:
-  public EventReceiver
+class TypeRegistryTest:
+  public testing::Test
 {};
+
+template<int>
+class Registered{};
 
 TEST_F(TypeRegistryTest, VerifySimpleLocalRegistration) {
   // Register two entries statically by uttering the static member's name:
@@ -23,7 +24,7 @@ TEST_F(TypeRegistryTest, VerifySimpleLocalRegistration) {
   // Enumerate, skipping both bounds on this set.  Note that the set will contain ALL utterances
   // of RegType, which means we must enumerate everything, and have to expect a lot of negative
   // matches.
-  for(auto p = g_pFirstEntry; p; p = p->pFlink) {
+  for(auto p = g_pFirstTypeEntry; p; p = p->pFlink) {
     if(p->GetTypeInfo() == typeid(Registered<1>))
       exists1 = true;
     if(p->GetTypeInfo() == typeid(Registered<2>))
@@ -48,24 +49,9 @@ TEST_F(TypeRegistryTest, VerifyExteriorModuleRegistration) {
   // might be necessary to reduce the count from 8 to something lower.
   size_t nTypes = 0;
 
-  for(auto p = g_pFirstEntry; p; p = p->pFlink)
+  for(auto p = g_pFirstTypeEntry; p; p = p->pFlink)
     nTypes++;
 
   ASSERT_LT(8UL, nTypes) << "Registration failed to pick up the expected minimum number of types in this test";
-  ASSERT_EQ(g_entryCount, nTypes) << "Linked list did not contain the same number of entries as reported in g_entryCount";
-}
-
-class OnlyUsedForRegistrationChecking:
-  public EventReceiver
-{};
-
-TEST_F(TypeRegistryTest, AutoFiredShouldRegister) {
-  AutoFired<OnlyUsedForRegistrationChecking> af;
-
-  // Now that we've got an AutoFired declaration, check for membership:
-  for(auto p = g_pFirstEntry; p; p = p->pFlink)
-    if(typeid(OnlyUsedForRegistrationChecking) == p->ti)
-      return;
-
-  FAIL() << "Failed to find a type which should have been present in a type registry collection";
+  ASSERT_EQ(g_typeEntryCount, nTypes) << "Linked list did not contain the same number of entries as reported in g_entryCount";
 }

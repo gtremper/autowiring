@@ -1,10 +1,13 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "FactoryTest.hpp"
 #include "TestFixtures/SimpleInterface.hpp"
 #include <iostream>
 
 using namespace std;
+
+class FactoryTest:
+  public testing::Test
+{};
 
 /// <summary>
 /// Compile-time check to ensure that unconstructable types are identified correctly
@@ -34,7 +37,7 @@ public:
 
 static_assert(has_simple_constructor<ClassWithStaticNew>::value, "Class with default-argument constructor was not correctly detected as such ");
 static_assert(has_static_new<ClassWithStaticNew>::value, "Class with static allocator was not correctly detected as having one");
-static_assert(!has_static_new<Object>::value, "Static new detected on a class that does not have a static new");
+static_assert(!has_static_new<Object>::value, "Static New detected on a class that does not have a static New");
 
 TEST_F(FactoryTest, VerifyFactoryCall) {
   // Try to create the static new type:

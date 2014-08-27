@@ -16,7 +16,10 @@ T* DefaultCreate(void) {
 }
 
 template<typename T>
-void DefaultReset(T&){}
+void DefaultInitialize(T&){}
+
+template<typename T>
+void DefaultFinalize(T&){}
 
 /// <summary>
 /// Allows the management of a pool of objects based on an embedded factory
@@ -43,25 +46,28 @@ public:
     size_t limit = ~0,
     size_t maxPooled = ~0,
     const std::function<T*()>& alloc = &DefaultCreate<T>,
-    const std::function<void(T&)>& rx = &DefaultReset<T>
+    const std::function<void(T&)>& initial = &DefaultInitialize<T>,
+    const std::function<void(T&)>& final = &DefaultFinalize<T>
   ) :
     m_monitor(std::make_shared<ObjectPoolMonitor>(this)),
     m_poolVersion(0),
     m_maxPooled(maxPooled),
     m_limit(limit),
     m_outstanding(0),
-    m_rx(rx),
+    m_initial(initial),
+    m_final(final),
     m_alloc(alloc)
   {}
 
   /// <param name="limit">The maximum number of objects this pool will allow to be outstanding at any time</param>
   ObjectPool(
     const std::function<T*()>& alloc,
-    const std::function<void(T&)>& rx = &DefaultReset<T>,
+    const std::function<void(T&)>& initial = &DefaultInitialize<T>,
+    const std::function<void(T&)>& final = &DefaultFinalize<T>,
     size_t limit = ~0,
     size_t maxPooled = ~0
   ) :
-    ObjectPool(limit, maxPooled, alloc, rx)
+    ObjectPool(limit, maxPooled, alloc, initial, final)
   {}
   
   ObjectPool(ObjectPool&& rhs)
@@ -89,68 +95,87 @@ protected:
   // time the ClearCachedEntities method is called, and causes entities which might be trying
   // to return to the pool to instead free themselves.
   size_t m_poolVersion;
-  std::vector<std::shared_ptr<T>> m_objs;
+  std::vector<T*> m_objs;
 
   size_t m_maxPooled;
   size_t m_limit;
   size_t m_outstanding;
 
-  // Resetter:
-  std::function<void(T&)> m_rx;
+  // Resetters:
+  std::function<void(T&)> m_initial;
+  std::function<void(T&)> m_final;
 
   // Allocator:
   std::function<T*()> m_alloc;
 
   /// <summary>
-  /// Creates a shared pointer to wrap the specified object
+  /// Creates a shared pointer to wrap the specified object while it is issued
   /// </summary>
+  /// <remarks>
+  /// The Initialize is applied immediate when Wrap is called.
+  /// The Finalize function will be applied is in the shared_ptr destructor.
+  /// </remarks>
   std::shared_ptr<T> Wrap(T* pObj) {
     // Fill the shared pointer with the object we created, and ensure that we override
     // the destructor so that the object is returned to the pool when it falls out of
     // scope.
     size_t poolVersion = m_poolVersion;
     auto monitor = m_monitor;
+    std::function<void(T&)> final = m_final;
 
-    return std::shared_ptr<T>(
+    auto retVal = std::shared_ptr<T>(
       pObj,
-      [poolVersion, monitor](T* ptr) {
-        // Default behavior will be to destroy the pointer
-        std::unique_ptr<T> unique(ptr);
+      [poolVersion, monitor, final](T* ptr) {
+        // Finalize object before destruction or return to pool
+        final(*ptr);
 
-        // Hold the lock next, in order to ensure that destruction happens after the monitor
-        // lock is released.
-        std::lock_guard<std::mutex> lk(*monitor);
-
-        if(monitor->IsAbandoned())
-          // Nothing we can do, monitor object abandoned already, just destroy the object
-          return;
-
-        // Pass control to the Return method
-        static_cast<ObjectPool<T>*>(monitor->GetOwner())->Return(poolVersion, unique);
+        bool inPool = false;
+        {
+          // Obtain lock before deciding whether to delete or return to pool
+          std::lock_guard<std::mutex> lk(*monitor);
+          if(!monitor->IsAbandoned()) {
+            // Attempt to return object to pool
+            inPool = static_cast<ObjectPool<T>*>(monitor->GetOwner())->ReturnUnsafe(poolVersion, ptr);
+          }
+        }
+        if (!inPool) {
+          // Destroy returning object outside of lock
+          delete ptr;
+        }
       }
     );
+
+    // Initialize the issued object, now that a shared pointer has been created for it
+    m_initial(*pObj);
+
+    // All done
+    return retVal;
   }
 
-  void Return(size_t poolVersion, std::unique_ptr<T>& unique) {
+  bool ReturnUnsafe(size_t poolVersion, T* ptr) {
+    // ASSERT: Object has already been finalized
     // Always decrement the count when an object is no longer outstanding
     assert(m_outstanding);
     m_outstanding--;
 
+    bool inPool = false;
     if(
       // Pool versions have to match, or the object should be dumped
       poolVersion == m_poolVersion &&
 
       // Object pool needs to be capable of accepting another object as an input
       m_objs.size() < m_maxPooled
-    ) {
-      // Reset the object and put it back in the pool:
-      m_rx(*unique);
-      m_objs.push_back(Wrap(unique.release()));
+       ) {
+      // Return the object to the pool:
+      m_objs.push_back(ptr);
+      inPool = true;
     }
 
     // If the new outstanding count is less than or equal to the limit, wake up any waiters:
     if(m_outstanding <= m_limit)
       m_setCondition.notify_all();
+
+    return inPool;
   }
 
   /// <summary>
@@ -170,13 +195,14 @@ protected:
       lk.unlock();
 
       // We failed to recover an object, create a new one:
-      return Wrap(m_alloc());
+      auto obj = Wrap(m_alloc());
+      return obj;
     }
 
-    // Remove, return:
-    auto obj = m_objs.back();
-    m_objs.pop_back();
-    return obj;
+    // Transition from pooled to issued:
+    std::shared_ptr<T> iObj = Wrap(m_objs.back()); // Takes ownership
+    m_objs.pop_back(); // Remove unsafe reference
+    return iObj;
   }
 
 public:
@@ -206,20 +232,11 @@ public:
   /// prior to this call.
   /// </remarks>
   void ClearCachedEntities(void) {
-    // Declare this first, so it's freed last:
-    std::vector<std::shared_ptr<T>> objs;
-
-    // Move all of our objects into a local variable which we can then free at our leisure.  This allows us to
-    // perform destruction outside of the scope of a lock, preventing any deadlocks that might occur inside
-    // the shared_ptr cleanup lambda.
     std::lock_guard<std::mutex> lk(*m_monitor);
+    for (T* obj : m_objs)
+      delete obj;
+    m_objs.clear();
     m_poolVersion++;
-
-    // Swap the cached object collection with an empty one
-    std::swap(objs, m_objs);
-
-    // Technically, all of these entities are now outstanding.  Update accordingly.
-    m_outstanding += objs.size();
   }
 
   /// <summary>
@@ -233,7 +250,6 @@ public:
   void SetMaximumPooledEntities(size_t maxPooled) {
     m_maxPooled = maxPooled;
     for(;;) {
-      std::shared_ptr<T> prior;
       std::lock_guard<std::mutex> lk(*m_monitor);
 
       // Space check:
@@ -241,12 +257,8 @@ public:
         // Managed to get the size down sufficiently, we can continue:
         return;
 
-      // Removing an entry from the cache, must increase the outstanding count at this point
-      m_outstanding++;
-
-      // Funny syntax needed to ensure destructors run while we aren't holding any locks.  The prior
-      // shared_ptr will be reset after the lock is released, guaranteeing the desired ordering.
-      prior = m_objs.back();
+      // Remove unique pointer
+      delete m_objs.back();
       m_objs.pop_back();
     }
   }
@@ -402,12 +414,13 @@ public:
     std::swap(m_monitor, rhs.m_monitor);
 
     m_poolVersion = rhs.m_poolVersion;
-    m_objs = rhs.m_objs;
     m_maxPooled = rhs.m_maxPooled;
     m_limit = rhs.m_limit;
     m_outstanding = rhs.m_outstanding;
-    std::swap(m_rx, rhs.m_rx);
+    std::swap(m_objs, rhs.m_objs);
     std::swap(m_alloc, rhs.m_alloc);
+    std::swap(m_initial, rhs.m_initial);
+    std::swap(m_final, rhs.m_final);
 
     // Now we can take ownership of this monitor object:
     m_monitor->SetOwner(this);

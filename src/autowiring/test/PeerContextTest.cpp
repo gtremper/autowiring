@@ -1,16 +1,20 @@
 // Copyright (C) 2012-2014 Leap Motion, Inc. All rights reserved.
 #include "stdafx.h"
-#include "PeerContextTest.hpp"
 #include "TestFixtures/SimpleObject.hpp"
 #include "TestFixtures/SimpleReceiver.hpp"
 #include <autowiring/CoreThread.h>
+
+class PeerContextTest:
+  public testing::Test
+{};
 
 struct PeerContextName1 {};
 struct PeerContextName2 {};
 
 TEST_F(PeerContextTest, VerifySimplePeerage) {
   // Accept Events
-  AutoCurrentContext()->Initiate();
+  AutoCurrentContext ctxt;
+  ctxt->Initiate();
 
   // Insert a simple receiver first:
   AutoRequired<SimpleReceiver> sr;
@@ -29,7 +33,7 @@ TEST_F(PeerContextTest, VerifySimplePeerage) {
 
   {
     // Create a single peer context, make it current, and try to fire:
-    auto peer = m_create->CreatePeer<PeerContextName1>();
+    auto peer = ctxt->CreatePeer<PeerContextName1>();
     ASSERT_TRUE(nullptr != peer.get()) << "Peer context creation method returned a null pointer";
 
     CurrentContextPusher pshr(peer);
@@ -45,13 +49,14 @@ TEST_F(PeerContextTest, VerifySimplePeerage) {
 }
 
 TEST_F(PeerContextTest, VerifyPeerTransitivity) {
-  AutoCurrentContext()->Initiate();
+  AutoCurrentContext ctxt;
+  ctxt->Initiate();
 
   // Insert our simple receiver:
   AutoRequired<SimpleReceiver> sr;
 
   // Now create the first peer context:
-  auto peer1 = m_create->CreatePeer<PeerContextName1>();
+  auto peer1 = ctxt->CreatePeer<PeerContextName1>();
   peer1->Initiate();
   ASSERT_TRUE(nullptr != peer1.get());
 
@@ -72,13 +77,14 @@ TEST_F(PeerContextTest, VerifyPeerTransitivity) {
 
 TEST_F(PeerContextTest, VerifyNoAutowiringLeakage) {
   // Accept Events
-  AutoCurrentContext()->Initiate();
+  AutoCurrentContext ctxt;
+  ctxt->Initiate();
 
   // Insert a simple object in the base context
   AutoRequired<SimpleObject> obj1;
 
   // Create a peer context and make it current:
-  auto peer = m_create->CreatePeer<PeerContextName1>();
+  auto peer = ctxt->CreatePeer<PeerContextName1>();
   CurrentContextPusher pshr(peer);
 
   // Verify that, in this peer context, SimpleObject is not visible
